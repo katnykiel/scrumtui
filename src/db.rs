@@ -54,6 +54,13 @@ impl Db {
             );
             ",
         )?;
+        // Schema migrations — ignore errors if column already exists
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE issues ADD COLUMN parent_id INTEGER;",
+        );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE issues ADD COLUMN deleted_at TEXT;",
+        );
         Ok(())
     }
 
@@ -62,9 +69,10 @@ impl Db {
     pub fn get_all_issues(&self) -> Result<Vec<Issue>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at
+                    sprint_id, created_at, updated_at, completed_at, parent_id
              FROM issues
-             ORDER BY (sprint_id IS NULL), id",
+             WHERE deleted_at IS NULL
+             ORDER BY (sprint_id IS NULL), parent_id IS NOT NULL, id",
         )?;
         let issues = stmt
             .query_map([], |row| {
@@ -85,6 +93,7 @@ impl Db {
                     created_at: parse_dt(&row.get::<_, String>(8)?),
                     updated_at: parse_dt(&row.get::<_, String>(9)?),
                     completed_at: completed_str.as_deref().map(parse_dt),
+                    parent_id: row.get(11)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -94,7 +103,7 @@ impl Db {
     pub fn get_issue(&self, id: i64) -> Result<Issue> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at
+                    sprint_id, created_at, updated_at, completed_at, parent_id
              FROM issues WHERE id = ?1",
         )?;
         let issue = stmt.query_row(params![id], |row| {
@@ -115,6 +124,7 @@ impl Db {
                 created_at: parse_dt(&row.get::<_, String>(8)?),
                 updated_at: parse_dt(&row.get::<_, String>(9)?),
                 completed_at: completed_str.as_deref().map(parse_dt),
+                parent_id: row.get(11)?,
             })
         })?;
         Ok(issue)
@@ -129,18 +139,36 @@ impl Db {
         due_date: Option<NaiveDate>,
         description: Option<&str>,
     ) -> Result<i64> {
-        let now = now_str();
+        self.create_issue_full(
+            title, story_points, epic, status, due_date, description,
+            None, &now_str(), &now_str(), None,
+        )
+    }
+
+    /// Full insert with explicit timestamps and optional parent. Used by import.
+    pub fn create_issue_full(
+        &self,
+        title: &str,
+        story_points: f64,
+        epic: &str,
+        status: &Status,
+        due_date: Option<NaiveDate>,
+        description: Option<&str>,
+        parent_id: Option<i64>,
+        created_at: &str,
+        updated_at: &str,
+        completed_at: Option<&str>,
+    ) -> Result<i64> {
         let due_str = due_date.map(|d| d.format("%Y-%m-%d").to_string());
-        let completed_at: Option<String> = if status == &Status::Done {
-            Some(now.clone())
-        } else {
-            None
-        };
         self.conn.execute(
             "INSERT INTO issues
-             (title, story_points, epic, status, due_date, description, created_at, updated_at, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
-            params![title, story_points, epic, status.to_db(), due_str, description, now, completed_at],
+             (title, story_points, epic, status, due_date, description, parent_id,
+              created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                title, story_points, epic, status.to_db(), due_str, description,
+                parent_id, created_at, updated_at, completed_at
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -154,6 +182,7 @@ impl Db {
         status: &Status,
         due_date: Option<NaiveDate>,
         description: Option<&str>,
+        parent_id: Option<i64>,
     ) -> Result<()> {
         let now = now_str();
         let due_str = due_date.map(|d| d.format("%Y-%m-%d").to_string());
@@ -173,16 +202,160 @@ impl Db {
         self.conn.execute(
             "UPDATE issues
              SET title=?1, story_points=?2, epic=?3, status=?4, due_date=?5,
-                 description=?6, updated_at=?7, completed_at=?8
-             WHERE id=?9",
-            params![title, story_points, epic, status.to_db(), due_str, description, now, completed_at, id],
+                 description=?6, updated_at=?7, completed_at=?8, parent_id=?9
+             WHERE id=?10",
+            params![title, story_points, epic, status.to_db(), due_str, description, now, completed_at, parent_id, id],
         )?;
         Ok(())
     }
 
+    /// Soft-delete an issue (moves to trash). Subtasks are soft-deleted too.
     pub fn delete_issue(&self, id: i64) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM issues WHERE id = ?1", params![id])?;
+        let now = now_str();
+        self.conn.execute(
+            "UPDATE issues SET deleted_at=?1 WHERE parent_id=?2",
+            params![now, id],
+        )?;
+        self.conn.execute(
+            "UPDATE issues SET deleted_at=?1 WHERE id=?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Permanently delete an issue and its subtasks from the database.
+    pub fn purge_issue(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM issues WHERE parent_id=?1", params![id])?;
+        self.conn.execute("DELETE FROM issues WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    /// Restore a soft-deleted issue (and its subtasks) from the trash.
+    pub fn restore_issue(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE issues SET deleted_at=NULL WHERE parent_id=?1",
+            params![id],
+        )?;
+        self.conn.execute(
+            "UPDATE issues SET deleted_at=NULL WHERE id=?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Return all soft-deleted top-level issues (trash), newest first.
+    pub fn get_trash(&self) -> Result<Vec<Issue>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, story_points, epic, status, due_date, description,
+                    sprint_id, created_at, updated_at, completed_at, parent_id
+             FROM issues
+             WHERE deleted_at IS NOT NULL AND parent_id IS NULL
+             ORDER BY deleted_at DESC",
+        )?;
+        let items = stmt
+            .query_map([], |row| {
+                let status_str: String = row.get(4)?;
+                let due_str: Option<String> = row.get(5)?;
+                let completed_str: Option<String> = row.get(10)?;
+                Ok(Issue {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    story_points: row.get(2)?,
+                    epic: row.get(3)?,
+                    status: Status::from_db(&status_str),
+                    due_date: due_str.as_deref().and_then(|s| {
+                        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+                    }),
+                    description: row.get(6)?,
+                    sprint_id: row.get(7)?,
+                    created_at: parse_dt(&row.get::<_, String>(8)?),
+                    updated_at: parse_dt(&row.get::<_, String>(9)?),
+                    completed_at: completed_str.as_deref().map(parse_dt),
+                    parent_id: row.get(11)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(items)
+    }
+
+    // ── Subtasks ──────────────────────────────────────────────────────────────
+
+    /// Create a new subtask under `parent_id`. Subtasks have no story points or epic.
+    pub fn create_subtask(&self, title: &str, parent_id: i64, status: &Status) -> Result<i64> {
+        let now = now_str();
+        let completed_at: Option<&str> = if status == &Status::Done { Some(&now) } else { None };
+        self.conn.execute(
+            "INSERT INTO issues
+             (title, story_points, epic, status, parent_id, created_at, updated_at, completed_at)
+             VALUES (?1, 0, '', ?2, ?3, ?4, ?4, ?5)",
+            params![title, status.to_db(), parent_id, now, completed_at],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Update a subtask's title and status.
+    pub fn update_subtask(&self, id: i64, title: &str, status: &Status) -> Result<()> {
+        let now = now_str();
+        let prev = self.get_issue(id)?;
+        let completed_at: Option<String> = match status {
+            Status::Done => {
+                if prev.status == Status::Done {
+                    prev.completed_at.map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+                } else {
+                    Some(now.clone())
+                }
+            }
+            _ => None,
+        };
+        self.conn.execute(
+            "UPDATE issues SET title=?1, status=?2, updated_at=?3, completed_at=?4 WHERE id=?5",
+            params![title, status.to_db(), now, completed_at, id],
+        )?;
+        Ok(())
+    }
+
+    /// Recompute and persist a parent issue's status from its subtasks:
+    /// - any subtask InProgress → InProgress
+    /// - all subtasks Done → Done
+    /// - otherwise → Todo
+    pub fn update_parent_status_from_children(&self, parent_id: i64) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "SELECT status FROM issues WHERE parent_id = ?1 AND deleted_at IS NULL",
+        )?;
+        let statuses: Vec<String> = stmt
+            .query_map(params![parent_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        if statuses.is_empty() {
+            return Ok(());
+        }
+
+        // all DONE → Done; all TODO → Todo; any mix (incl. TODO+DONE) → InProgress
+        let new_status = if statuses.iter().all(|s| s == "DONE") {
+            Status::Done
+        } else if statuses.iter().all(|s| s == "TODO") {
+            Status::Todo
+        } else {
+            Status::InProgress
+        };
+
+        let now = now_str();
+        let completed_at: Option<String> = if new_status == Status::Done {
+            // Only set completed_at if it wasn't already done
+            let prev = self.get_issue(parent_id)?;
+            if prev.status == Status::Done {
+                prev.completed_at.map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+            } else {
+                Some(now.clone())
+            }
+        } else {
+            None
+        };
+
+        self.conn.execute(
+            "UPDATE issues SET status=?1, updated_at=?2, completed_at=?3 WHERE id=?4",
+            params![new_status.to_db(), now, completed_at, parent_id],
+        )?;
         Ok(())
     }
 
@@ -214,6 +387,15 @@ impl Db {
             "UPDATE issues SET status=?1, updated_at=?2, completed_at=?3 WHERE id=?4",
             params![status.to_db(), now, completed_at, issue_id],
         )?;
+        // If this issue is a subtask, cascade status update to its parent
+        let parent_id: Option<i64> = self.conn.query_row(
+            "SELECT parent_id FROM issues WHERE id = ?1",
+            params![issue_id],
+            |row| row.get(0),
+        ).ok().flatten();
+        if let Some(pid) = parent_id {
+            let _ = self.update_parent_status_from_children(pid);
+        }
         Ok(())
     }
 

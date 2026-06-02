@@ -19,9 +19,7 @@ const BAR_WIDTH: usize = 26;
 const BAR_LEAD: usize = 12; // chars before the opening "["
 
 pub fn render(f: &mut Frame, app: &App, area: Rect) {
-    let issues = &app.issues;
-
-    if issues.is_empty() {
+    if app.issues.is_empty() {
         f.render_widget(
             Paragraph::new("  No issues yet. Go to the backlog (1) and press n to create one.")
                 .style(Style::default().fg(Color::DarkGray))
@@ -38,16 +36,28 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let today = Local::now().date_naive();
-    let sprint = app.active_sprint.as_ref();
 
-    let timeline_start: NaiveDate = sprint.map(|s| s.start_date).unwrap_or(today);
-    let latest_due = issues
-        .iter()
-        .filter_map(|i| i.due_date)
+    // Only show top-level issues (no children) in gantt
+    let issues: Vec<_> = app.issues.iter().filter(|i| i.parent_id.is_none()).collect();
+
+    let bar_end_of = |i: &&crate::models::Issue| -> NaiveDate {
+        if i.status == crate::models::Status::Done {
+            i.completed_at.map(|dt| dt.date()).or(i.due_date).unwrap_or(today)
+        } else {
+            i.due_date.unwrap_or(today)
+        }
+    };
+
+    let timeline_start = issues.iter()
+        .map(|i| i.created_at.date())
+        .min()
+        .unwrap_or(today - Duration::days(1));
+    let timeline_end = issues.iter()
+        .map(|i| bar_end_of(i))
         .max()
         .unwrap_or(today + Duration::days(14));
-    let sprint_end = sprint.map(|s| s.end_date).unwrap_or(today + Duration::days(6));
-    let timeline_end = latest_due.max(sprint_end).max(today + Duration::days(7));
+    // Ensure at least a few days of range and the timeline doesn't run backwards
+    let timeline_end = timeline_end.max(timeline_start + Duration::days(3));
     let total_days = (timeline_end - timeline_start).num_days().max(1) as usize;
 
     // Available inner width (subtract 2 for block borders)
@@ -68,7 +78,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     )));
 
     for epic in &epics {
-        let epic_issues: Vec<_> = issues.iter().filter(|i| &i.epic == epic).collect();
+        let epic_issues: Vec<_> = issues.iter().filter(|i| &i.epic == epic && i.parent_id.is_none()).collect();
         if epic_issues.is_empty() {
             continue;
         }
@@ -81,10 +91,8 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         )));
 
         for issue in &epic_issues {
-            let bar_start = sprint.map(|s| s.start_date).unwrap_or(issue.created_at.date());
-            let bar_end = issue
-                .due_date
-                .unwrap_or_else(|| sprint.map(|s| s.end_date).unwrap_or(today));
+            let bar_start = issue.created_at.date();
+            let bar_end = bar_end_of(issue);
 
             let bar = build_bar(bar_start, bar_end, timeline_start, total_days, &issue.status);
             let sc = status_color(&issue.status);

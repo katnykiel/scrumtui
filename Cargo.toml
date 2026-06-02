@@ -13,3 +13,4 @@ crossterm = "0.28"
 rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = "0.4"
 anyhow = "1"
+csv = "1"

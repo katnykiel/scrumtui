@@ -61,13 +61,18 @@ On the very first run, the database is empty and **sample data is loaded automat
 |-----|--------|
 | `j` / `k` or `↓` / `↑` | Move selection down / up |
 | `g` / `G` | Jump to first / last issue |
+| `>` or `.` | Advance selected issue / subtask to next status |
+| `<` or `,` | Regress selected issue / subtask to previous status |
 | `n` | Create a new issue |
-| `e` or `Enter` | Edit the selected issue |
-| `d` | Delete the selected issue (confirm with `d` again) |
+| `e` or `Enter` | Edit the selected issue (opens the edit form) |
+| `d` | Move the selected issue to trash (confirm with `d` again) |
+| `T` | Open the trash to restore or permanently delete issues |
 | `s` | Toggle the selected issue in/out of the active sprint |
 | `S` | Open the sprint manager (create or edit the sprint, view burnup) |
+| `/` | Start search filter |
+| `c` | Toggle showing completed issues |
 
-The sprint is shown at the top with a box around it. Issues below the sprint box are in the backlog.
+The sprint is shown at the top with a box around it. Issues below the sprint box are in the backlog. Subtasks are shown indented beneath their parent issue.
 
 ### Kanban view
 
@@ -97,9 +102,34 @@ Issues are grouped by epic. Each issue takes two rows: the title on the first li
 | `Enter` | Save |
 | `Esc` | Cancel without saving |
 
+After the last field, `Tab` moves focus into the **Subtasks** section:
+
+| Key (in Subtask section) | Action |
+|--------------------------|--------|
+| `j` / `k` | Navigate subtasks |
+| `e` or `i` | Edit the selected subtask's title |
+| `]` or `>` / `[` or `<` | Advance / regress subtask status |
+| `x` | Remove (mark deleted, applied on save) |
+| `Ctrl-N` | Add a new subtask |
+| `Esc` | Return focus to form fields |
+| `Enter` | Save the whole form |
+
+Subtasks can also be added when **creating** a new issue. They appear as independent cards on the Kanban board and their statuses are managed independently. A parent issue's status is automatically derived from its subtasks: all Done → Done; all Todo → Todo; any mix → In Progress.
+
+### Trash
+
+When you delete an issue it is moved to the trash (not permanently removed). Open the trash with `T`:
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate |
+| `r` | Restore the selected issue |
+| `D` | Permanently delete the selected issue (cannot be undone) |
+| `Esc` | Close |
+
 ### Delete confirmation
 
-When you press `d` on an issue, a confirmation popup appears. Press `d` again to confirm deletion, or `n` / `Esc` to cancel.
+When you press `d` on an issue, a confirmation popup appears. Press `d` again to move it to trash, or `n` / `Esc` to cancel.
 
 ---
 
@@ -109,12 +139,13 @@ When you press `d` on an issue, a confirmation popup appears. Press `d` again to
 |-------|----------|-------|
 | Title | ✓ | |
 | Story Points | ✓ | Any positive number, including decimals (e.g. `0.5`, `2.5`) |
-| Epic | ✓ | Free text label for grouping (e.g. `dft`, `writing`) |
-| Status | ✓ | TODO / IN PROGRESS / DONE |
+| Epic | ✓ | Free text label for grouping (e.g. `dft`, `writing`). Autocompletes from existing epics. |
+| Status | ✓ | TODO / IN PROGRESS / DONE. Auto-managed when subtasks exist. |
 | Due Date | — | Format: `YYYY-MM-DD` |
 | Description | — | Free text; shown in the detail pane at the bottom of the backlog |
+| Subtasks | — | Independent sub-items with their own status; no story points. Created in the form's Subtasks section. |
 
-All changes (status, edits) are written to the SQLite database immediately.
+All changes are written to the SQLite database immediately on save.
 
 ---
 
@@ -130,6 +161,5 @@ All changes (status, edits) are written to the SQLite database immediately.
 ## Limitations / known gaps
 
 - Only one sprint can be active at a time
-- No child issues (planned but not implemented)
 - No export, no sync, no notifications
 - The terminal must be at least ~100 columns wide for the full layout to render cleanly

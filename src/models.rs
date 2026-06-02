@@ -91,6 +91,7 @@ pub struct Issue {
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
     pub completed_at: Option<NaiveDateTime>,
+    pub parent_id: Option<i64>,
 }
 
 /// Display story points without unnecessary trailing zeros.
@@ -108,6 +109,11 @@ impl Issue {
             Some(d) => d.format("%Y-%m-%d").to_string(),
             None => String::new(),
         }
+    }
+
+    /// Returns true if this issue is a subtask (has a parent).
+    pub fn is_subtask(&self) -> bool {
+        self.parent_id.is_some()
     }
 }
 

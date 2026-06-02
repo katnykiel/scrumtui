@@ -22,7 +22,18 @@ pub enum BacklogItem {
     SprintHeader(Sprint),
     SprintFooter,
     BacklogHeader,
-    Issue(Issue, bool), // (issue, is_in_sprint)
+    Issue(Issue, bool),       // (issue, is_in_sprint)
+    Subtask(Issue, bool),     // (subtask issue, parent_is_in_sprint)
+}
+
+// ── Subtask draft (held in IssueForm while editing) ───────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct SubtaskDraft {
+    pub id: Option<i64>,
+    pub title: String,
+    pub status_idx: usize,
+    pub deleted: bool,
 }
 
 // ── Issue form ────────────────────────────────────────────────────────────────
@@ -36,8 +47,20 @@ pub struct IssueForm {
     pub status_idx: usize,
     pub due_date: String,
     pub description: String,
-    pub focused_field: usize, // 0=title 1=sp 2=epic 3=status 4=due 5=desc
+    pub focused_field: usize,  // 0=title 1=sp 2=epic 3=status 4=due 5=desc
     pub error: Option<String>,
+    /// Whether the epic autocomplete dropdown is visible.
+    pub epic_dropdown_open: bool,
+    /// Selected row in the epic dropdown.
+    pub epic_dropdown_sel: usize,
+    /// Subtasks (only populated when editing an existing issue).
+    pub subtasks: Vec<SubtaskDraft>,
+    /// Selected row in the subtask list.
+    pub subtask_sel: usize,
+    /// Whether keyboard focus is in the subtask list.
+    pub in_subtask_list: bool,
+    /// Whether the currently selected subtask title is being edited.
+    pub subtask_editing: bool,
 }
 
 impl IssueForm {
@@ -52,6 +75,12 @@ impl IssueForm {
             description: String::new(),
             focused_field: 0,
             error: None,
+            epic_dropdown_open: false,
+            epic_dropdown_sel: 0,
+            subtasks: Vec::new(),
+            subtask_sel: 0,
+            in_subtask_list: false,
+            subtask_editing: false,
         }
     }
 
@@ -66,6 +95,12 @@ impl IssueForm {
             description: issue.description.clone().unwrap_or_default(),
             focused_field: 0,
             error: None,
+            epic_dropdown_open: false,
+            epic_dropdown_sel: 0,
+            subtasks: Vec::new(),
+            subtask_sel: 0,
+            in_subtask_list: false,
+            subtask_editing: false,
         }
     }
 
@@ -184,6 +219,7 @@ pub enum Popup {
     EditIssue(IssueForm),
     SprintManager(SprintForm),
     ConfirmDelete(i64, String), // (issue_id, issue_title)
+    Trash { items: Vec<Issue>, sel: usize },
     Help,
 }
 
@@ -204,6 +240,12 @@ pub struct App {
     pub gantt_scroll: usize,
     pub popup: Option<Popup>,
     pub status_msg: Option<String>,
+    /// Whether to show Done issues in the backlog.
+    pub show_completed: bool,
+    /// Live search query (empty = no filter).
+    pub search_query: String,
+    /// Whether the search bar is in focus / receiving input.
+    pub search_active: bool,
 }
 
 impl App {
@@ -221,6 +263,9 @@ impl App {
             gantt_scroll: 0,
             popup: None,
             status_msg: None,
+            show_completed: true,
+            search_query: String::new(),
+            search_active: false,
         })
     }
 
@@ -237,21 +282,57 @@ impl App {
 
     // ── Derived data ───────────────────────────────────────────────────────────
 
-    /// Build the flat display list for the backlog view.
+    /// Build the flat display list for the backlog view, respecting filters.
     pub fn backlog_items(&self) -> Vec<BacklogItem> {
         let mut items: Vec<BacklogItem> = Vec::new();
+        let q = self.search_query.to_lowercase();
+
+        // Build children lookup: parent_id → Vec<Issue>
+        let mut children_map: std::collections::HashMap<i64, Vec<Issue>> =
+            std::collections::HashMap::new();
+        for issue in &self.issues {
+            if let Some(pid) = issue.parent_id {
+                children_map.entry(pid).or_default().push(issue.clone());
+            }
+        }
+
+        let search_matches = |issue: &Issue| -> bool {
+            if q.is_empty() { return true; }
+            let haystack = format!(
+                "{} {} {}",
+                issue.title.to_lowercase(),
+                issue.epic.to_lowercase(),
+                issue.description.as_deref().unwrap_or("").to_lowercase()
+            );
+            haystack.contains(&q)
+        };
+
+        let emit_with_subtasks = |items: &mut Vec<BacklogItem>,
+                                   issue: Issue,
+                                   in_sprint: bool,
+                                   subtasks_map: &std::collections::HashMap<i64, Vec<Issue>>| {
+            let id = issue.id;
+            items.push(BacklogItem::Issue(issue, in_sprint));
+            if let Some(subs) = subtasks_map.get(&id) {
+                for sub in subs {
+                    items.push(BacklogItem::Subtask(sub.clone(), in_sprint));
+                }
+            }
+        };
 
         if let Some(sprint) = &self.active_sprint {
+            // Sprint issues: always show Done; search filter still applies
             let sprint_issues: Vec<Issue> = self
                 .issues
                 .iter()
-                .filter(|i| i.sprint_id == Some(sprint.id))
+                .filter(|i| i.sprint_id == Some(sprint.id) && i.parent_id.is_none())
+                .filter(|i| search_matches(i))
                 .cloned()
                 .collect();
             if !sprint_issues.is_empty() {
                 items.push(BacklogItem::SprintHeader(sprint.clone()));
                 for issue in sprint_issues {
-                    items.push(BacklogItem::Issue(issue, true));
+                    emit_with_subtasks(&mut items, issue, true, &children_map);
                 }
                 items.push(BacklogItem::SprintFooter);
             }
@@ -260,9 +341,13 @@ impl App {
         let backlog: Vec<Issue> = self
             .issues
             .iter()
-            .filter(|i| match &self.active_sprint {
-                Some(s) => i.sprint_id != Some(s.id),
-                None => true,
+            .filter(|i| {
+                let in_sprint = self.active_sprint.as_ref().map(|s| i.sprint_id == Some(s.id)).unwrap_or(false);
+                !in_sprint && i.parent_id.is_none()
+            })
+            .filter(|i| {
+                if !self.show_completed && i.status == Status::Done { return false; }
+                search_matches(i)
             })
             .cloned()
             .collect();
@@ -270,7 +355,7 @@ impl App {
         if !backlog.is_empty() {
             items.push(BacklogItem::BacklogHeader);
             for issue in backlog {
-                items.push(BacklogItem::Issue(issue, false));
+                emit_with_subtasks(&mut items, issue, false, &children_map);
             }
         }
 
@@ -278,24 +363,88 @@ impl App {
     }
 
     /// The issue currently selected in the backlog (if any).
+    /// Selecting a subtask returns the parent issue so it can be edited.
     pub fn selected_issue(&self) -> Option<Issue> {
         let items = self.backlog_items();
         match items.get(self.backlog_sel) {
             Some(BacklogItem::Issue(issue, _)) => Some(issue.clone()),
+            Some(BacklogItem::Subtask(sub, _)) => {
+                sub.parent_id.and_then(|pid| self.issues.iter().find(|i| i.id == pid).cloned())
+            }
             _ => None,
         }
     }
 
-    pub fn sprint_issues_by_status(&self, status: &Status) -> Vec<Issue> {
+    /// Look up an issue by id from the loaded cache.
+    pub fn issue_by_id(&self, id: i64) -> Option<&Issue> {
+        self.issues.iter().find(|i| i.id == id)
+    }
+
+    /// All subtasks whose parent is in the active sprint, by status.
+    fn sprint_subtasks_by_status(&self, status: &Status) -> Vec<Issue> {
         match &self.active_sprint {
+            Some(s) => {
+                let sprint_parent_ids: std::collections::HashSet<i64> = self
+                    .issues
+                    .iter()
+                    .filter(|i| i.sprint_id == Some(s.id) && i.parent_id.is_none())
+                    .map(|i| i.id)
+                    .collect();
+                self.issues
+                    .iter()
+                    .filter(|i| {
+                        i.parent_id.is_some()
+                            && &i.status == status
+                            && i.parent_id
+                                .map(|pid| sprint_parent_ids.contains(&pid))
+                                .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect()
+            }
+            None => vec![],
+        }
+    }
+
+    /// Sprint issues by status for kanban — top-level issues + subtasks whose parent is in sprint.
+    pub fn sprint_issues_by_status(&self, status: &Status) -> Vec<Issue> {
+        let mut items = match &self.active_sprint {
             Some(s) => self
                 .issues
                 .iter()
-                .filter(|i| i.sprint_id == Some(s.id) && &i.status == status)
+                .filter(|i| i.sprint_id == Some(s.id) && &i.status == status && i.parent_id.is_none())
                 .cloned()
-                .collect(),
+                .collect::<Vec<_>>(),
             None => vec![],
-        }
+        };
+        items.extend(self.sprint_subtasks_by_status(status));
+        items
+    }
+
+    /// Subtask count for a given parent issue.
+    pub fn subtask_counts(&self, parent_id: i64) -> (usize, usize) {
+        let all: Vec<_> = self.issues.iter().filter(|i| i.parent_id == Some(parent_id)).collect();
+        let done = all.iter().filter(|i| i.status == Status::Done).count();
+        (done, all.len())
+    }
+
+    /// Whether a given issue has any subtasks.
+    pub fn has_subtasks(&self, issue_id: i64) -> bool {
+        self.issues.iter().any(|i| i.parent_id == Some(issue_id))
+    }
+
+    /// Build SubtaskDraft list from loaded issues for a given parent.
+    pub fn subtask_drafts_for(&self, parent_id: i64) -> Vec<SubtaskDraft> {
+        self.issues
+            .iter()
+            .filter(|i| i.parent_id == Some(parent_id))
+            .map(|i| SubtaskDraft {
+                id: Some(i.id),
+                title: i.title.clone(),
+                status_idx: i.status.index(),
+                deleted: false,
+            })
+            .collect()
     }
 
     /// Unique epics across all issues, sorted alphabetically.
@@ -314,7 +463,7 @@ impl App {
     // ── Navigation helpers ─────────────────────────────────────────────────────
 
     fn is_selectable(item: &BacklogItem) -> bool {
-        matches!(item, BacklogItem::Issue(_, _))
+        matches!(item, BacklogItem::Issue(_, _) | BacklogItem::Subtask(_, _))
     }
 
     pub fn backlog_down(&mut self) {
@@ -394,6 +543,35 @@ impl App {
             return self.handle_popup_key(key);
         }
 
+        // Search bar intercepts typing when active
+        if self.search_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.search_active = false;
+                    self.search_query.clear();
+                    self.backlog_sel_to_first_issue();
+                }
+                KeyCode::Enter => {
+                    self.search_active = false;
+                    self.backlog_sel_to_first_issue();
+                }
+                KeyCode::Backspace => {
+                    if key.modifiers.contains(KeyModifiers::ALT) {
+                        delete_word(&mut self.search_query);
+                    } else {
+                        self.search_query.pop();
+                    }
+                    self.backlog_sel_to_first_issue();
+                }
+                KeyCode::Char(c) => {
+                    self.search_query.push(c);
+                    self.backlog_sel_to_first_issue();
+                }
+                _ => {}
+            }
+            return false;
+        }
+
         // Global keys
         match key.code {
             KeyCode::Char('q') => return true,
@@ -429,7 +607,24 @@ impl App {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.backlog_down(),
             KeyCode::Char('k') | KeyCode::Up => self.backlog_up(),
+            KeyCode::PageDown | KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                for _ in 0..10 { self.backlog_down(); }
+            }
+            KeyCode::PageUp | KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                for _ in 0..10 { self.backlog_up(); }
+            }
             KeyCode::Char('g') => self.backlog_sel_to_first_issue(),
+            KeyCode::Char('/') => {
+                self.search_active = true;
+            }
+            KeyCode::Char('c') => {
+                self.show_completed = !self.show_completed;
+                let len = self.backlog_items().len();
+                if self.backlog_sel >= len && len > 0 {
+                    self.backlog_sel = len - 1;
+                }
+                self.backlog_sel_to_first_issue();
+            }
             KeyCode::Char('G') => {
                 // jump to last issue
                 let items = self.backlog_items();
@@ -445,7 +640,9 @@ impl App {
             }
             KeyCode::Char('e') | KeyCode::Enter => {
                 if let Some(issue) = self.selected_issue() {
-                    self.popup = Some(Popup::EditIssue(IssueForm::from_issue(&issue)));
+                    let mut form = IssueForm::from_issue(&issue);
+                    form.subtasks = self.subtask_drafts_for(issue.id);
+                    self.popup = Some(Popup::EditIssue(form));
                 }
             }
             KeyCode::Char('d') => {
@@ -484,6 +681,44 @@ impl App {
                 };
                 self.popup = Some(Popup::SprintManager(form));
             }
+            KeyCode::Char('T') => {
+                match self.db.get_trash() {
+                    Ok(items) => self.popup = Some(Popup::Trash { items, sel: 0 }),
+                    Err(e) => self.status_msg = Some(format!("Error: {e}")),
+                }
+            }
+            KeyCode::Char('>') | KeyCode::Char('.') => {
+                self.backlog_advance_status(1);
+            }
+            KeyCode::Char('<') | KeyCode::Char(',') => {
+                self.backlog_advance_status(-1);
+            }
+            _ => {}
+        }
+    }
+
+    /// Advance (+1) or regress (-1) the selected backlog item's status.
+    fn backlog_advance_status(&mut self, dir: i32) {
+        let items = self.backlog_items();
+        match items.get(self.backlog_sel).cloned() {
+            Some(BacklogItem::Issue(issue, _)) => {
+                if self.has_subtasks(issue.id) {
+                    self.status_msg = Some("Status is auto-managed by subtasks.".into());
+                    return;
+                }
+                let new_status = if dir > 0 { issue.status.next() } else { issue.status.prev() };
+                if new_status != issue.status {
+                    let _ = self.db.update_issue_status(issue.id, &new_status);
+                    let _ = self.reload();
+                }
+            }
+            Some(BacklogItem::Subtask(sub, _)) => {
+                let new_status = if dir > 0 { sub.status.next() } else { sub.status.prev() };
+                if new_status != sub.status {
+                    let _ = self.db.update_issue_status(sub.id, &new_status);
+                    let _ = self.reload();
+                }
+            }
             _ => {}
         }
     }
@@ -504,38 +739,55 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.kanban_up(),
             KeyCode::Char('>') | KeyCode::Char('.') => {
                 if let Some(issue) = self.kanban_selected_issue() {
-                    let new_status = issue.status.next();
-                    if new_status != issue.status {
-                        let _ = self.db.update_issue_status(issue.id, &new_status);
-                        let _ = self.reload();
-                        // Try to keep selection in the same column
-                        let col = new_status.index();
-                        self.kanban_col = col;
-                        let len = self.sprint_issues_by_status(&new_status).len();
-                        if self.kanban_rows[col] >= len && len > 0 {
-                            self.kanban_rows[col] = len - 1;
+                    if !issue.is_subtask() && self.has_subtasks(issue.id) {
+                        self.status_msg = Some("Status managed by subtasks.".into());
+                    } else {
+                        let new_status = issue.status.next();
+                        if new_status != issue.status {
+                            let _ = self.db.update_issue_status(issue.id, &new_status);
+                            let _ = self.reload();
+                            let col = new_status.index();
+                            self.kanban_col = col;
+                            let len = self.sprint_issues_by_status(&new_status).len();
+                            if self.kanban_rows[col] >= len && len > 0 {
+                                self.kanban_rows[col] = len - 1;
+                            }
                         }
                     }
                 }
             }
             KeyCode::Char('<') | KeyCode::Char(',') => {
                 if let Some(issue) = self.kanban_selected_issue() {
-                    let new_status = issue.status.prev();
-                    if new_status != issue.status {
-                        let _ = self.db.update_issue_status(issue.id, &new_status);
-                        let _ = self.reload();
-                        let col = new_status.index();
-                        self.kanban_col = col;
-                        let len = self.sprint_issues_by_status(&new_status).len();
-                        if self.kanban_rows[col] >= len && len > 0 {
-                            self.kanban_rows[col] = len - 1;
+                    if !issue.is_subtask() && self.has_subtasks(issue.id) {
+                        self.status_msg = Some("Status managed by subtasks.".into());
+                    } else {
+                        let new_status = issue.status.prev();
+                        if new_status != issue.status {
+                            let _ = self.db.update_issue_status(issue.id, &new_status);
+                            let _ = self.reload();
+                            let col = new_status.index();
+                            self.kanban_col = col;
+                            let len = self.sprint_issues_by_status(&new_status).len();
+                            if self.kanban_rows[col] >= len && len > 0 {
+                                self.kanban_rows[col] = len - 1;
+                            }
                         }
                     }
                 }
             }
             KeyCode::Char('e') | KeyCode::Enter => {
                 if let Some(issue) = self.kanban_selected_issue() {
-                    self.popup = Some(Popup::EditIssue(IssueForm::from_issue(&issue)));
+                    // For subtasks, open the parent issue's edit form
+                    let target = if issue.is_subtask() {
+                        issue.parent_id.and_then(|pid| self.issue_by_id(pid).cloned())
+                    } else {
+                        Some(issue)
+                    };
+                    if let Some(parent) = target {
+                        let mut form = IssueForm::from_issue(&parent);
+                        form.subtasks = self.subtask_drafts_for(parent.id);
+                        self.popup = Some(Popup::EditIssue(form));
+                    }
                 }
             }
             _ => {}
@@ -573,11 +825,57 @@ impl App {
                             self.status_msg = Some(format!("Error: {e}"));
                         } else {
                             let _ = self.reload();
-                            self.status_msg = Some("Issue deleted.".into());
+                            self.status_msg = Some("Issue moved to trash.".into());
                         }
                     }
                     KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                         self.popup = None;
+                    }
+                    _ => {}
+                }
+            }
+
+            Some(Popup::Trash { items, sel }) => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        self.popup = None;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        let len = items.len();
+                        if len > 0 && *sel + 1 < len { *sel += 1; }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if *sel > 0 { *sel -= 1; }
+                    }
+                    KeyCode::Char('r') => {
+                        if let Some(issue) = items.get(*sel).cloned() {
+                            self.popup = None;
+                            if let Err(e) = self.db.restore_issue(issue.id) {
+                                self.status_msg = Some(format!("Error: {e}"));
+                            } else {
+                                let _ = self.reload();
+                                self.status_msg = Some(format!("\"{}\" restored.", issue.title));
+                            }
+                        }
+                    }
+                    KeyCode::Char('D') => {
+                        if let Some(issue) = items.get(*sel).cloned() {
+                            let new_sel = sel.saturating_sub(1);
+                            self.popup = None;
+                            if let Err(e) = self.db.purge_issue(issue.id) {
+                                self.status_msg = Some(format!("Error: {e}"));
+                            } else {
+                                // Reopen trash with updated list
+                                match self.db.get_trash() {
+                                    Ok(new_items) => {
+                                        let clamped = new_sel.min(new_items.len().saturating_sub(1));
+                                        self.popup = Some(Popup::Trash { items: new_items, sel: clamped });
+                                    }
+                                    Err(e) => self.status_msg = Some(format!("Error: {e}")),
+                                }
+                                self.status_msg = Some(format!("\"{}\" permanently deleted.", issue.title));
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -600,21 +898,72 @@ impl App {
             _ => return,
         };
 
+        // ── Subtask-list navigation (when focus is in the subtask section) ──────
+        if popup.in_subtask_list {
+            return self.handle_subtask_list_key(key);
+        }
+
         match key.code {
             KeyCode::Esc => {
+                if popup.epic_dropdown_open {
+                    popup.epic_dropdown_open = false;
+                    return;
+                }
                 self.popup = None;
                 return;
             }
             KeyCode::Tab => {
-                popup.focused_field = (popup.focused_field + 1) % IssueForm::field_count();
+                popup.epic_dropdown_open = false;
+                let next = popup.focused_field + 1;
+                if next >= IssueForm::field_count() {
+                    // Move focus into subtask list
+                    popup.in_subtask_list = true;
+                    popup.subtask_sel = 0;
+                    popup.subtask_editing = false;
+                } else {
+                    popup.focused_field = next % IssueForm::field_count();
+                }
                 return;
             }
             KeyCode::BackTab => {
+                popup.epic_dropdown_open = false;
                 popup.focused_field =
                     (popup.focused_field + IssueForm::field_count() - 1) % IssueForm::field_count();
                 return;
             }
             KeyCode::Enter => {
+                // If dropdown open, commit selected epic and close instead of saving form
+                if popup.epic_dropdown_open {
+                    let q = popup.epic.to_lowercase();
+                    let matches: Vec<String> = self
+                        .issues
+                        .iter()
+                        .map(|i| i.epic.clone())
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .filter(|e| e.to_lowercase().contains(&q))
+                        .collect::<Vec<_>>();
+                    let mut sorted = matches;
+                    sorted.sort();
+                    let sel = popup.epic_dropdown_sel.min(sorted.len().saturating_sub(1));
+                    if let Some(chosen) = sorted.into_iter().nth(sel) {
+                        // Re-borrow popup after self usage
+                        let popup = match &mut self.popup {
+                            Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
+                            _ => return,
+                        };
+                        popup.epic = chosen;
+                        popup.epic_dropdown_open = false;
+                        popup.epic_dropdown_sel = 0;
+                    } else {
+                        let popup = match &mut self.popup {
+                            Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
+                            _ => return,
+                        };
+                        popup.epic_dropdown_open = false;
+                    }
+                    return;
+                }
                 // Submit form – need to extract form data first
                 if let Some(err) = popup.validate() {
                     popup.error = Some(err);
@@ -634,22 +983,49 @@ impl App {
                 let desc: Option<String> = if popup.description.is_empty() {
                     None
                 } else {
-                    Some(popup.description.trim().to_string())
+                    Some(popup.description.clone())
+                };
+
+                // Capture subtask data before closing popup
+                let subtask_drafts = {
+                    let popup = match &self.popup {
+                        Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
+                        _ => return,
+                    };
+                    popup.subtasks.clone()
                 };
 
                 self.popup = None;
 
-                let result = if let Some(id) = editing_id {
-                    self.db.update_issue(id, &title, sp, &epic, &status, due_date, desc.as_deref())
+                // Returns the issue id (new or existing) so we can attach subtasks
+                let id_result: Result<i64, _> = if let Some(id) = editing_id {
+                    self.db.update_issue(id, &title, sp, &epic, &status, due_date, desc.as_deref(), None)
+                        .map(|_| id)
                 } else {
-                    self.db
-                        .create_issue(&title, sp, &epic, &status, due_date, desc.as_deref())
-                        .map(|_| ())
+                    self.db.create_issue(&title, sp, &epic, &status, due_date, desc.as_deref())
                 };
 
-                match result {
+                match id_result {
                     Err(e) => self.status_msg = Some(format!("Error: {e}")),
-                    Ok(_) => {
+                    Ok(parent_id) => {
+                        // Persist subtask drafts (works for both new and edit)
+                        for draft in &subtask_drafts {
+                            if draft.deleted {
+                                if let Some(id) = draft.id {
+                                    let _ = self.db.delete_issue(id);
+                                }
+                            } else if let Some(id) = draft.id {
+                                let st = Status::from_index(draft.status_idx);
+                                let _ = self.db.update_subtask(id, &draft.title, &st);
+                            } else if !draft.title.trim().is_empty() {
+                                let st = Status::from_index(draft.status_idx);
+                                let _ = self.db.create_subtask(&draft.title, parent_id, &st);
+                            }
+                        }
+                        // Recompute parent status whenever subtasks exist
+                        if !subtask_drafts.is_empty() {
+                            let _ = self.db.update_parent_status_from_children(parent_id);
+                        }
                         let _ = self.reload();
                         self.status_msg = Some(if editing_id.is_some() {
                             "Issue updated.".into()
@@ -685,16 +1061,225 @@ impl App {
                 }
                 _ => {}
             }
-        } else if let Some(field) = popup.active_text_field() {
+        } else if popup.focused_field == 2 && popup.epic_dropdown_open {
+            // Epic dropdown navigation — commit selection on Enter/Tab
             match key.code {
+                KeyCode::Down => {
+                    popup.epic_dropdown_sel = popup.epic_dropdown_sel.saturating_add(1);
+                }
+                KeyCode::Up => {
+                    popup.epic_dropdown_sel = popup.epic_dropdown_sel.saturating_sub(1);
+                }
+                KeyCode::Tab => {
+                    // Commit then advance field
+                    let q = popup.epic.to_lowercase();
+                    let mut sorted: Vec<String> = self
+                        .issues
+                        .iter()
+                        .map(|i| i.epic.clone())
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .filter(|e| e.to_lowercase().contains(&q))
+                        .collect();
+                    sorted.sort();
+                    let sel = popup.epic_dropdown_sel.min(sorted.len().saturating_sub(1));
+                    let popup = match &mut self.popup {
+                        Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
+                        _ => return,
+                    };
+                    if let Some(chosen) = sorted.into_iter().nth(sel) {
+                        popup.epic = chosen;
+                    }
+                    popup.epic_dropdown_open = false;
+                    popup.epic_dropdown_sel = 0;
+                    popup.focused_field = (popup.focused_field + 1) % IssueForm::field_count();
+                }
+                KeyCode::Esc => {
+                    popup.epic_dropdown_open = false;
+                }
                 KeyCode::Backspace => {
-                    field.pop();
+                    if key.modifiers.contains(KeyModifiers::ALT) {
+                        delete_word(&mut popup.epic);
+                    } else {
+                        popup.epic.pop();
+                    }
+                    popup.epic_dropdown_open = !popup.epic.is_empty();
+                    popup.epic_dropdown_sel = 0;
                 }
                 KeyCode::Char(c) => {
-                    field.push(c);
+                    popup.epic.push(c);
+                    popup.epic_dropdown_open = true;
+                    popup.epic_dropdown_sel = 0;
                 }
                 _ => {}
             }
+        } else if let Some(field) = popup.active_text_field() {
+            match key.code {
+                KeyCode::Backspace => {
+                    if key.modifiers.contains(KeyModifiers::ALT) {
+                        delete_word(field);
+                    } else {
+                        field.pop();
+                    }
+                    // Open dropdown if we're on the epic field
+                    if popup.focused_field == 2 {
+                        popup.epic_dropdown_open = !popup.epic.is_empty();
+                        popup.epic_dropdown_sel = 0;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    field.push(c);
+                    // Open epic dropdown on any char input in epic field
+                    if popup.focused_field == 2 {
+                        popup.epic_dropdown_open = true;
+                        popup.epic_dropdown_sel = 0;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn handle_subtask_list_key(&mut self, key: KeyEvent) {
+        let popup = match &mut self.popup {
+            Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
+            _ => return,
+        };
+
+        if popup.subtask_editing {
+            // Title-edit mode for selected subtask
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => {
+                    popup.subtask_editing = false;
+                }
+                KeyCode::Tab => {
+                    popup.subtask_editing = false;
+                    if !popup.subtasks.is_empty() {
+                        let next = popup.subtask_sel + 1;
+                        if next < popup.subtasks.len() {
+                            popup.subtask_sel = next;
+                            popup.subtask_editing = true;
+                        } else {
+                            // Wrap back to top fields
+                            popup.in_subtask_list = false;
+                            popup.focused_field = 0;
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    if key.modifiers.contains(KeyModifiers::ALT) {
+                        if let Some(st) = popup.subtasks.get_mut(popup.subtask_sel) {
+                            delete_word(&mut st.title);
+                        }
+                    } else if let Some(st) = popup.subtasks.get_mut(popup.subtask_sel) {
+                        st.title.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(st) = popup.subtasks.get_mut(popup.subtask_sel) {
+                        st.title.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Browse mode
+        match key.code {
+            KeyCode::Esc => {
+                popup.in_subtask_list = false;
+                popup.focused_field = IssueForm::field_count() - 1;
+                return;
+            }
+            KeyCode::Tab => {
+                // Back to top fields
+                popup.in_subtask_list = false;
+                popup.focused_field = 0;
+                return;
+            }
+            KeyCode::BackTab => {
+                popup.in_subtask_list = false;
+                popup.focused_field = IssueForm::field_count() - 1;
+                return;
+            }
+            KeyCode::Enter => {
+                // Submit form (same as main form Enter)
+                if let Some(err) = popup.validate() {
+                    popup.error = Some(err);
+                    return;
+                }
+                // Fall through to form-submit by exiting subtask list and re-handling Enter
+                popup.in_subtask_list = false;
+                self.handle_issue_form_key(key);
+                return;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                let visible_len = popup.subtasks.iter().filter(|s| !s.deleted).count();
+                if visible_len > 0 && popup.subtask_sel + 1 < visible_len {
+                    popup.subtask_sel += 1;
+                }
+                return;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if popup.subtask_sel > 0 {
+                    popup.subtask_sel -= 1;
+                }
+                return;
+            }
+            KeyCode::Char('e') | KeyCode::Char('i') => {
+                if !popup.subtasks.is_empty() {
+                    popup.subtask_editing = true;
+                }
+                return;
+            }
+            KeyCode::Char(']') | KeyCode::Char('>') | KeyCode::Char('.') => {
+                // Advance subtask status
+                let vis_idx = popup.subtask_sel;
+                if let Some(st) = popup.subtasks.iter_mut().filter(|s| !s.deleted).nth(vis_idx) {
+                    if st.status_idx < 2 {
+                        st.status_idx += 1;
+                    }
+                }
+                return;
+            }
+            KeyCode::Char('[') | KeyCode::Char('<') | KeyCode::Char(',') => {
+                // Regress subtask status
+                let vis_idx = popup.subtask_sel;
+                if let Some(st) = popup.subtasks.iter_mut().filter(|s| !s.deleted).nth(vis_idx) {
+                    if st.status_idx > 0 {
+                        st.status_idx -= 1;
+                    }
+                }
+                return;
+            }
+            KeyCode::Char('x') | KeyCode::Delete => {
+                // Mark selected subtask for deletion
+                let vis_idx = popup.subtask_sel;
+                let target = popup.subtasks.iter_mut().filter(|s| !s.deleted).nth(vis_idx);
+                if let Some(st) = target {
+                    st.deleted = true;
+                    let visible_len = popup.subtasks.iter().filter(|s| !s.deleted).count();
+                    if popup.subtask_sel >= visible_len && popup.subtask_sel > 0 {
+                        popup.subtask_sel -= 1;
+                    }
+                }
+                return;
+            }
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Add new subtask
+                popup.subtasks.push(SubtaskDraft {
+                    id: None,
+                    title: String::new(),
+                    status_idx: 0,
+                    deleted: false,
+                });
+                let visible_len = popup.subtasks.iter().filter(|s| !s.deleted).count();
+                popup.subtask_sel = visible_len.saturating_sub(1);
+                popup.subtask_editing = true;
+                return;
+            }
+            _ => {}
         }
     }
 
@@ -767,7 +1352,11 @@ impl App {
         } else if let Some(field) = popup.active_text_field() {
             match key.code {
                 KeyCode::Backspace => {
-                    field.pop();
+                    if key.modifiers.contains(KeyModifiers::ALT) {
+                        delete_word(field);
+                    } else {
+                        field.pop();
+                    }
                 }
                 KeyCode::Char(c) => {
                     field.push(c);
@@ -783,5 +1372,21 @@ impl App {
         let mut state = ListState::default();
         state.select(Some(self.backlog_sel));
         state
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Delete from end of `s` back to (and including) the last word boundary.
+/// Mimics the typical Alt+Backspace / Option+Delete behaviour.
+pub fn delete_word(s: &mut String) {
+    // Trim trailing spaces first, then remove the word
+    let trimmed_len = s.trim_end().len();
+    s.truncate(trimmed_len);
+    // Find last space (word boundary)
+    if let Some(pos) = s.rfind(' ') {
+        s.truncate(pos + 1); // keep the space before the word
+    } else {
+        s.clear();
     }
 }

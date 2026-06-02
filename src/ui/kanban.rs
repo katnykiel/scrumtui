@@ -80,21 +80,58 @@ fn render_column(f: &mut Frame, app: &mut App, area: Rect, col_idx: usize, statu
                 .map(|d| format!("  {}", d.format("%b %d")))
                 .unwrap_or_default();
 
-            ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled(pointer, Style::default().fg(Color::Magenta)),
-                    Span::styled(
-                        format!(" {}", trunc(&issue.title, col_width.saturating_sub(3))),
-                        Style::default(),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled(
-                        format!("   {}sp  {}{}", format_sp(issue.story_points), issue.epic, due),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]),
-            ])
+            if issue.is_subtask() {
+                // Subtask card: show parent label + title
+                let parent_label = issue.parent_id
+                    .and_then(|pid| app.issue_by_id(pid))
+                    .map(|p| trunc(&p.title, col_width.saturating_sub(6)))
+                    .unwrap_or_default();
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled(pointer, Style::default().fg(Color::Magenta)),
+                        Span::styled(
+                            format!(" {}", trunc(&issue.title, col_width.saturating_sub(3))),
+                            Style::default(),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(
+                            format!("   ↳ {}{}", parent_label, due),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]),
+                ];
+                ListItem::new(lines)
+            } else {
+                // Regular issue card
+                let (done_subs, total_subs) = app.subtask_counts(issue.id);
+                let subtask_badge = if total_subs > 0 {
+                    format!("  [{}/{}]", done_subs, total_subs)
+                } else {
+                    String::new()
+                };
+                let auto_status = if total_subs > 0 {
+                    format!("  ⊙")
+                } else {
+                    String::new()
+                };
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled(pointer, Style::default().fg(Color::Magenta)),
+                        Span::styled(
+                            format!(" {}", trunc(&issue.title, col_width.saturating_sub(3))),
+                            Style::default(),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(
+                            format!("   {}sp  {}{}{}{}", format_sp(issue.story_points), issue.epic, due, subtask_badge, auto_status),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]),
+                ];
+                ListItem::new(lines)
+            }
         })
         .collect();
 

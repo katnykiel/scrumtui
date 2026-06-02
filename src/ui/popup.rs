@@ -5,21 +5,24 @@ use ratatui::{
     symbols,
     text::{Line, Span},
     widgets::{
-        Axis, Block, BorderType, Borders, Chart, Clear, Dataset, GraphType, Paragraph,
+        Axis, Block, BorderType, Borders, Chart, Clear, Dataset, GraphType, List, ListItem,
+        Paragraph,
     },
     Frame,
 };
 
 use crate::app::{App, IssueForm, Popup, SprintForm};
 use crate::models::{format_sp, Issue, Status};
+use crate::ui::backlog::{status_color, status_symbol};
 
 /// Render whichever popup is active on top of the existing frame.
 pub fn render(f: &mut Frame, popup: &Popup, app: &App) {
     match popup {
-        Popup::NewIssue(form) => render_issue_form(f, form, "New Issue"),
-        Popup::EditIssue(form) => render_issue_form(f, form, "Edit Issue"),
+        Popup::NewIssue(form) => render_issue_form(f, form, "New Issue", app),
+        Popup::EditIssue(form) => render_issue_form(f, form, "Edit Issue", app),
         Popup::SprintManager(form) => render_sprint_form(f, form, app),
         Popup::ConfirmDelete(_, title) => render_confirm_delete(f, title),
+        Popup::Trash { items, sel } => render_trash(f, items, *sel),
         Popup::Help => render_help(f),
     }
 }
@@ -48,9 +51,20 @@ const FIELD_LABELS: [&str; 6] = [
     "Description",
 ];
 
-fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str) {
-    let area = centered_rect(72, 22, f.area());
+fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
+    let visible_subtasks = form.subtasks.iter().filter(|s| !s.deleted).count();
+    // header + each subtask row, minimum 3 rows so the section is always visible
+    let subtask_section_height: u16 = (2 + visible_subtasks).max(3) as u16;
+    let base_height: u16 = 22;
+    let total_height = (base_height + subtask_section_height).min(f.area().height.saturating_sub(2));
+    let area = centered_rect(72, total_height, f.area());
     f.render_widget(Clear, area);
+
+    let bottom_hint = if form.in_subtask_list {
+        " [j/k] nav  [e] edit  []/[ status  [x] del  [Ctrl+N] add  [Esc] back  [Enter] save "
+    } else {
+        " [Tab] next field  [Enter] save  [Esc] cancel "
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -66,7 +80,7 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str) {
             Span::raw(" "),
         ]))
         .title_bottom(Line::from(Span::styled(
-            " [Tab] next field  [Enter] save  [Esc] cancel ",
+            bottom_hint,
             Style::default().fg(Color::DarkGray),
         )))
         .border_style(Style::default().fg(Color::Rgb(100, 100, 180)));
@@ -84,20 +98,24 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str) {
             Constraint::Length(3), // due
             Constraint::Length(3), // desc
             Constraint::Length(2), // error
+            Constraint::Min(subtask_section_height), // subtasks
         ])
         .split(inner);
 
+    // For display, show the description on one line (collapse newlines)
+    let desc_display = form.description.replace('\n', "  ·  ");
     let values: [String; 6] = [
         form.title.clone(),
         form.story_points.clone(),
         form.epic.clone(),
         Status::from_index(form.status_idx).label().to_string(),
         form.due_date.clone(),
-        form.description.clone(),
+        desc_display,
     ];
 
     for i in 0..6 {
-        let is_focused = form.focused_field == i;
+        // Don't show any field as focused when the subtask section has focus
+        let is_focused = form.focused_field == i && !form.in_subtask_list;
         let label = FIELD_LABELS[i];
 
         let value_display = if i == 3 {
@@ -176,6 +194,216 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str) {
             field_areas[6],
         );
     }
+
+    // ── Subtask list (always shown) ───────────────────────────────────────────────────────
+    render_subtask_list(f, form, field_areas[7]);
+
+    // ── Epic autocomplete dropdown ─────────────────────────────────────────────
+    if form.epic_dropdown_open {
+        render_epic_dropdown(f, form, app, field_areas[2]);
+    }
+}
+
+fn render_subtask_list(f: &mut Frame, form: &IssueForm, area: Rect) {
+    let is_focused = form.in_subtask_list;
+    let border_color = if is_focused { Color::Cyan } else { Color::Rgb(60, 60, 90) };
+    let label_style = if is_focused {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(border_color))
+        .title(Line::from(vec![
+            Span::styled(" Subtasks ", label_style),
+            Span::styled(
+                if is_focused { "" } else { "[Tab] to focus" },
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.height == 0 {
+        return;
+    }
+
+    let visible: Vec<_> = form.subtasks.iter().filter(|s| !s.deleted).collect();
+    let mut lines: Vec<Line> = Vec::new();
+
+    if visible.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no subtasks)  — Ctrl+N to add one",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for (vis_idx, st) in visible.iter().enumerate() {
+            let is_sel = is_focused && vis_idx == form.subtask_sel;
+            let status = Status::from_index(st.status_idx);
+            let sc = status_color(&status);
+            let sym = status_symbol(&status);
+            let pointer = if is_sel { "▶" } else { " " };
+            // Show cursor only when actively editing the title
+            let cursor = if is_sel && form.subtask_editing { "▌" } else { "" };
+            let row_style = if is_sel && !form.subtask_editing {
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else if is_sel {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let status_label = match status {
+                Status::Todo => "TODO",
+                Status::InProgress => " IP ",
+                Status::Done => "DONE",
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {pointer} "), Style::default().fg(Color::Magenta)),
+                Span::styled(format!("{sym} "), Style::default().fg(sc)),
+                Span::styled(
+                    format!("{}{}", st.title, cursor),
+                    row_style,
+                ),
+                Span::styled(
+                    format!("  {status_label}"),
+                    Style::default().fg(sc),
+                ),
+            ]));
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+// ── Trash popup ──────────────────────────────────────────────────────────────────
+
+fn render_trash(f: &mut Frame, items: &[crate::models::Issue], sel: usize) {
+    let height = (items.len() as u16 + 6).max(10).min(f.area().height.saturating_sub(4));
+    let area = centered_rect(68, height, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Line::from(vec![
+            Span::raw(" "),
+            Span::styled("🗑  Trash", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+        ]))
+        .title_bottom(Line::from(Span::styled(
+            " [r] restore  [D] purge permanently  [Esc] close ",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .border_style(Style::default().fg(Color::Red));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if items.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  Trash is empty.",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            inner,
+        );
+        return;
+    }
+
+    use crate::ui::backlog::trunc;
+    let list_items: Vec<ListItem> = items
+        .iter()
+        .enumerate()
+        .map(|(i, issue)| {
+            let is_sel = i == sel;
+            let pointer = if is_sel { "▶" } else { " " };
+            let style = if is_sel {
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {pointer} "), Style::default().fg(Color::Red)),
+                Span::styled(
+                    format!("{:<44}", trunc(&issue.title, 44)),
+                    style,
+                ),
+                Span::styled(
+                    format!("  {:<14}", trunc(&issue.epic, 14)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        })
+        .collect();
+
+    let mut state = ratatui::widgets::ListState::default();
+    state.select(Some(sel));
+    let list = List::new(list_items)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
+    f.render_stateful_widget(list, inner, &mut state);
+}
+
+fn render_epic_dropdown(f: &mut Frame, form: &IssueForm, app: &App, epic_field_area: Rect) {
+    let q = form.epic.to_lowercase();
+    let matches: Vec<String> = app
+        .epics()
+        .into_iter()
+        .filter(|e| e.to_lowercase().contains(&q))
+        .collect();
+
+    if matches.is_empty() {
+        return;
+    }
+
+    let max_items = 6usize;
+    let visible: Vec<&String> = matches.iter().take(max_items).collect();
+    let height = visible.len() as u16 + 2; // +2 for border
+    let width = (visible.iter().map(|e| e.len()).max().unwrap_or(10) + 4)
+        .max(20)
+        .min(epic_field_area.width as usize) as u16;
+
+    let drop_area = Rect {
+        x: epic_field_area.x + 2,
+        y: epic_field_area.y + epic_field_area.height,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, drop_area);
+
+    let sel = form.epic_dropdown_sel.min(visible.len().saturating_sub(1));
+    let items: Vec<ListItem> = visible
+        .iter()
+        .enumerate()
+        .map(|(i, epic)| {
+            let is_sel = i == sel;
+            ListItem::new(Line::from(Span::styled(
+                format!(" {epic}"),
+                if is_sel {
+                    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            )))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(Span::styled(" epics ", Style::default().fg(Color::DarkGray))),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+    let mut state = ratatui::widgets::ListState::default();
+    state.select(Some(sel));
+    f.render_stateful_widget(list, drop_area, &mut state);
 }
 
 // ── Sprint form ────────────────────────────────────────────────────────────────
@@ -480,7 +708,7 @@ fn render_confirm_delete(f: &mut Frame, title: &str) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .title(Span::styled(
-            " Delete Issue ",
+            " Move to Trash ",
             Style::default()
                 .fg(Color::Red)
                 .add_modifier(Modifier::BOLD),
@@ -493,7 +721,7 @@ fn render_confirm_delete(f: &mut Frame, title: &str) {
     let lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Delete: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Trash: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 title,
                 Style::default()
@@ -503,7 +731,7 @@ fn render_confirm_delete(f: &mut Frame, title: &str) {
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "  [d] confirm delete    [n / Esc] cancel",
+            "  [d] confirm    [n / Esc] cancel",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -570,9 +798,11 @@ fn render_help(f: &mut Frame) {
         hdr("BACKLOG  (view 1)"),
         key("j / k  ↑ / ↓", "Navigate issues"),
         key("g / G", "Jump to first / last issue"),
+        key("> or .  / < or ,", "Advance / regress status"),
         key("n", "New issue"),
         key("e  Enter", "Edit selected issue"),
-        key("d", "Delete selected issue"),
+        key("d", "Move to trash"),
+        key("T", "Open trash (restore / purge)"),
         key("s", "Toggle sprint membership"),
         key("S", "Open sprint manager"),
         sep(),

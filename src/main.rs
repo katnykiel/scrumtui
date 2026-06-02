@@ -1,5 +1,7 @@
 mod app;
 mod db;
+mod export;
+mod import;
 mod models;
 mod seed;
 mod ui;
@@ -23,6 +25,39 @@ fn main() -> Result<()> {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         format!("{home}/.scrumtui.db")
     };
+
+    // ── CLI subcommands ────────────────────────────────────────────────────────
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(|s| s.as_str()) {
+        Some("import") => {
+            let csv_path = args.get(2).map(|s| s.as_str()).unwrap_or_else(|| {
+                eprintln!("Usage: scrumtui import <path.csv>");
+                std::process::exit(1);
+            });
+            let db = Db::open(&db_path)?;
+            println!("Importing from {csv_path} → {db_path}");
+            let report = import::import_jira_csv(&db, csv_path)?;
+            println!("Done.  {} issues imported,  {} rows skipped.", report.imported, report.skipped);
+            return Ok(());
+        }
+        Some("export") => {
+            let out_path = args.get(2).map(|s| s.as_str()).unwrap_or("scrumtui-export.md");
+            let db = Db::open(&db_path)?;
+            export::export_markdown(&db, out_path)?;
+            println!("Exported to {out_path}");
+            return Ok(());
+        }
+        Some("help") | Some("--help") | Some("-h") => {
+            println!("scrumtui — local terminal scrum board");
+            println!();
+            println!("USAGE:");
+            println!("  scrumtui                      open the TUI");
+            println!("  scrumtui import <path.csv>    import Jira CSV");
+            println!("  scrumtui export [output.md]   export to markdown (default: scrumtui-export.md)");
+            return Ok(());
+        }
+        _ => {}
+    }
 
     let db = Db::open(&db_path)?;
 
