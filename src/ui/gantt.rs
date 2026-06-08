@@ -27,7 +27,14 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
                     Block::default()
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
-                        .title(" epic / gantt ")
+                        .title(Line::from(vec![
+                            Span::raw(" "),
+                            Span::styled(
+                                "epic / gantt",
+                                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(" "),
+                        ]))
                         .border_style(Style::default().fg(Color::Rgb(80, 80, 120))),
                 ),
             area,
@@ -103,6 +110,10 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
                     format!("    {}", crate::ui::backlog::trunc(&issue.title, title_max)),
                     Style::default().fg(Color::Rgb(200, 200, 200)),
                 ),
+                Span::styled(
+                    format!("  #{}", issue.id),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]));
 
             // ── Line 2: sp + bar + dates + status ──────────────────────────
@@ -143,7 +154,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw(" "),
             ]))
             .title_bottom(Line::from(Span::styled(
-                " [j/k] scroll  [1]backlog [2]kanban  [?]help ",
+                " [j/k] scroll  [1]backlog  [2]kanban  [3]gantt  [?]help ",
                 Style::default().fg(Color::DarkGray),
             )))
             .border_style(Style::default().fg(Color::Rgb(80, 80, 120))),

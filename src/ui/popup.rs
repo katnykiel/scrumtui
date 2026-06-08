@@ -19,7 +19,13 @@ use crate::ui::backlog::{status_color, status_symbol};
 pub fn render(f: &mut Frame, popup: &Popup, app: &App) {
     match popup {
         Popup::NewIssue(form) => render_issue_form(f, form, "New Issue", app),
-        Popup::EditIssue(form) => render_issue_form(f, form, "Edit Issue", app),
+        Popup::EditIssue(form) => {
+            let title: String = match form.editing_id {
+                Some(id) => format!("Edit Issue  #{id}"),
+                None => "Edit Issue".to_string(),
+            };
+            render_issue_form(f, form, &title, app);
+        }
         Popup::SprintManager(form) => render_sprint_form(f, form, app),
         Popup::ConfirmDelete(_, title) => render_confirm_delete(f, title),
         Popup::Trash { items, sel } => render_trash(f, items, *sel),
@@ -202,6 +208,11 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
     if form.epic_dropdown_open {
         render_epic_dropdown(f, form, app, field_areas[2]);
     }
+
+    // ── Due-date autocomplete dropdown ─────────────────────────────────────────
+    if form.due_date_dropdown_open {
+        render_due_date_dropdown(f, form, app, field_areas[4]);
+    }
 }
 
 fn render_subtask_list(f: &mut Frame, form: &IssueForm, area: Rect) {
@@ -255,11 +266,7 @@ fn render_subtask_list(f: &mut Frame, form: &IssueForm, area: Rect) {
             } else {
                 Style::default()
             };
-            let status_label = match status {
-                Status::Todo => "TODO",
-                Status::InProgress => " IP ",
-                Status::Done => "DONE",
-            };
+            let status_label = status.short();
             lines.push(Line::from(vec![
                 Span::styled(format!(" {pointer} "), Style::default().fg(Color::Magenta)),
                 Span::styled(format!("{sym} "), Style::default().fg(sc)),
@@ -406,6 +413,71 @@ fn render_epic_dropdown(f: &mut Frame, form: &IssueForm, app: &App, epic_field_a
     f.render_stateful_widget(list, drop_area, &mut state);
 }
 
+fn render_due_date_dropdown(f: &mut Frame, form: &IssueForm, app: &App, field_area: Rect) {
+    let q = form.due_date.to_lowercase();
+    let matches: Vec<String> = app
+        .due_dates()
+        .into_iter()
+        .filter(|d| d.contains(&q))
+        .collect();
+
+    if matches.is_empty() {
+        return;
+    }
+
+    let max_items = 6usize;
+    let visible: Vec<&String> = matches.iter().take(max_items).collect();
+    let height = visible.len() as u16 + 2;
+    let width = (visible.iter().map(|d| d.len()).max().unwrap_or(10) + 4)
+        .max(20)
+        .min(field_area.width as usize) as u16;
+
+    let drop_area = Rect {
+        x: field_area.x + 2,
+        y: field_area.y + field_area.height,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, drop_area);
+
+    let sel = form.due_date_dropdown_sel.min(visible.len().saturating_sub(1));
+    let items: Vec<ListItem> = visible
+        .iter()
+        .enumerate()
+        .map(|(i, date)| {
+            let is_sel = i == sel;
+            let label = if app.today_str() == **date {
+                format!(" {date}  ← today")
+            } else {
+                format!(" {date}")
+            };
+            ListItem::new(Line::from(Span::styled(
+                label,
+                if is_sel {
+                    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            )))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(Span::styled(" due dates ", Style::default().fg(Color::DarkGray))),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+    let mut state = ratatui::widgets::ListState::default();
+    state.select(Some(sel));
+    f.render_stateful_widget(list, drop_area, &mut state);
+}
+
 // ── Sprint form ────────────────────────────────────────────────────────────────
 
 fn render_sprint_form(f: &mut Frame, form: &SprintForm, app: &App) {
@@ -531,31 +603,57 @@ fn render_sprint_form(f: &mut Frame, form: &SprintForm, app: &App) {
         );
     }
 
-    // ── Right: burndown chart ──────────────────────────────────────────────────
-    render_burndown(f, form, app, h_chunks[1]);
+    // ── Right: burnup chart ───────────────────────────────────────────────────
+    let chart_area = h_chunks[1];
+    if let Some(sprint_id) = form.editing_id {
+        let start = chrono::NaiveDate::parse_from_str(&form.start_date, "%Y-%m-%d").ok();
+        let end   = chrono::NaiveDate::parse_from_str(&form.end_date,   "%Y-%m-%d").ok();
+        if let (Some(start), Some(end)) = (start, end) {
+            let sprint_issues: Vec<&Issue> = app
+                .issues
+                .iter()
+                .filter(|i| i.sprint_id == Some(sprint_id))
+                .collect();
+            render_burnup_chart(f, start, end, &sprint_issues, chart_area);
+            return;
+        }
+    }
+    // Fallback: no sprint selected yet
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  No active sprint.",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "  Save to create one.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(Span::styled(" burnup ", Style::default().fg(Color::DarkGray)))
+                .border_style(Style::default().fg(Color::Rgb(80, 60, 100))),
+        ),
+        chart_area,
+    );
 }
 
-/// Compute burnup data for the active sprint.
+/// Compute burnup data from a sprint's date range and its issues.
 /// Returns (ideal_line, actual_line, total_sp, sprint_days).
-fn compute_burnup(
-    form: &SprintForm,
-    app: &App,
+pub fn compute_burnup_for(
+    start: chrono::NaiveDate,
+    end: chrono::NaiveDate,
+    issues: &[&Issue],
 ) -> Option<(Vec<(f64, f64)>, Vec<(f64, f64)>, f64, f64)> {
-    let sprint_id = form.editing_id?;
-    let start =
-        chrono::NaiveDate::parse_from_str(&form.start_date, "%Y-%m-%d").ok()?;
-    let end = chrono::NaiveDate::parse_from_str(&form.end_date, "%Y-%m-%d").ok()?;
     if end <= start {
         return None;
     }
 
-    let sprint_issues: Vec<&Issue> = app
-        .issues
-        .iter()
-        .filter(|i| i.sprint_id == Some(sprint_id))
-        .collect();
-
-    let total_sp: f64 = sprint_issues.iter().map(|i| i.story_points).sum();
+    let total_sp: f64 = issues.iter().map(|i| i.story_points).sum();
     if total_sp <= 0.0 {
         return None;
     }
@@ -565,17 +663,16 @@ fn compute_burnup(
     // Ideal burnup: straight line from (0,0) to (sprint_days, total_sp)
     let ideal: Vec<(f64, f64)> = vec![(0.0, 0.0), (sprint_days, total_sp)];
 
-    // Actual burnup: step function of cumulative completed story points per day
+    // Actual burnup: step function of cumulative completed story points per day.
+    // For completed sprints we walk all the way to end_date so the full curve shows.
     let today = Local::now().date_naive();
-    let max_day = (today - start)
-        .num_days()
-        .min((end - start).num_days())
-        .max(0);
+    let walk_to = today.min(end);
+    let max_day = (walk_to - start).num_days().max(0);
 
     let mut actual: Vec<(f64, f64)> = vec![(0.0, 0.0)];
     for d in 1..=max_day {
         let day_date = start + Duration::days(d);
-        let cum_sp: f64 = sprint_issues
+        let cum_sp: f64 = issues
             .iter()
             .filter(|i| {
                 i.status == Status::Done
@@ -591,7 +688,15 @@ fn compute_burnup(
     Some((ideal, actual, total_sp, sprint_days))
 }
 
-fn render_burndown(f: &mut Frame, form: &SprintForm, app: &App, area: Rect) {
+/// Render a burnup chart for any sprint given its dates and issues.
+/// Used by both the sprint manager popup and the history view.
+pub fn render_burnup_chart(
+    f: &mut Frame,
+    start: chrono::NaiveDate,
+    end: chrono::NaiveDate,
+    issues: &[&Issue],
+    area: Rect,
+) {
     let chart_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -601,32 +706,13 @@ fn render_burndown(f: &mut Frame, form: &SprintForm, app: &App, area: Rect) {
         ))
         .border_style(Style::default().fg(Color::Rgb(80, 60, 100)));
 
-    if form.editing_id.is_none() {
-        f.render_widget(
-            Paragraph::new(vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "  No active sprint.",
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Line::from(Span::styled(
-                    "  Save to create one.",
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ])
-            .block(chart_block),
-            area,
-        );
-        return;
-    }
-
-    match compute_burnup(form, app) {
+    match compute_burnup_for(start, end, issues) {
         None => {
             f.render_widget(
                 Paragraph::new(vec![
                     Line::from(""),
                     Line::from(Span::styled(
-                        "  No sprint issues yet.",
+                        "  No story points in sprint.",
                         Style::default().fg(Color::DarkGray),
                     )),
                 ])
@@ -638,7 +724,6 @@ fn render_burndown(f: &mut Frame, form: &SprintForm, app: &App, area: Rect) {
             let y_max = total_sp * 1.1;
             let x_max = sprint_days + 0.5;
 
-            // Build x-axis labels
             let mid_day = (sprint_days / 2.0).round() as i64;
             let x_labels = vec![
                 Span::styled("0", Style::default().fg(Color::DarkGray)),
@@ -707,12 +792,16 @@ fn render_confirm_delete(f: &mut Frame, title: &str) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(Span::styled(
-            " Move to Trash ",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
-        ))
+        .title(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                "Move to Trash",
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ]))
         .border_style(Style::default().fg(Color::Red));
 
     let inner = block.inner(area);
@@ -742,7 +831,7 @@ fn render_confirm_delete(f: &mut Frame, title: &str) {
 // ── Help ───────────────────────────────────────────────────────────────────────
 
 fn render_help(f: &mut Frame) {
-    let area = centered_rect(62, 32, f.area());
+    let area = centered_rect(66, 58, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -762,7 +851,7 @@ fn render_help(f: &mut Frame) {
             " [Esc / q / ?] close ",
             Style::default().fg(Color::DarkGray),
         )))
-        .border_style(Style::default().fg(Color::Rgb(80, 80, 140)));
+        .border_style(Style::default().fg(Color::Rgb(80, 80, 120)));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -770,7 +859,7 @@ fn render_help(f: &mut Frame) {
     let key = |k: &'static str, desc: &'static str| -> Line<'static> {
         Line::from(vec![
             Span::styled(
-                format!("  {k:<22}"),
+                format!("  {k:<24}"),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -791,17 +880,22 @@ fn render_help(f: &mut Frame) {
     let lines = vec![
         sep(),
         hdr("GLOBAL"),
-        key("1 / 2 / 3", "Switch view: backlog / kanban / gantt"),
+        key("1 / 2 / 3 / 4", "Backlog / Kanban / Gantt / Sprint history"),
         key("q  Ctrl-C", "Quit"),
         key("?", "Toggle this help"),
+        key("u  Ctrl-Z", "Undo last action (up to 50 steps)"),
         sep(),
         hdr("BACKLOG  (view 1)"),
         key("j / k  ↑ / ↓", "Navigate issues"),
         key("g / G", "Jump to first / last issue"),
-        key("> or .  / < or ,", "Advance / regress status"),
+        key("Ctrl-D / Ctrl-U", "Jump down / up 10 items"),
+        key("R / r", "Move selected issue up / down in rank"),
+        key("/", "Search / filter issues"),
+        key("c", "Toggle show / hide completed issues"),
+        key("] / [", "Advance / regress status"),
         key("n", "New issue"),
         key("e  Enter", "Edit selected issue"),
-        key("d", "Move to trash"),
+        key("d", "Move to trash (confirm with d)"),
         key("T", "Open trash (restore / purge)"),
         key("s", "Toggle sprint membership"),
         key("S", "Open sprint manager"),
@@ -809,22 +903,38 @@ fn render_help(f: &mut Frame) {
         hdr("KANBAN  (view 2)"),
         key("h / l  ← / →", "Switch column"),
         key("j / k  ↑ / ↓", "Navigate within column"),
-        key("> or .", "Advance issue to next status"),
-        key("< or ,", "Regress issue to previous status"),
+        key("] / [", "Advance / regress status"),
         key("e  Enter", "Edit selected issue"),
         sep(),
         hdr("GANTT  (view 3)"),
-        key("j / k", "Scroll down / up"),
+        key("j / k  ↑ / ↓", "Scroll down / up"),
+        sep(),
+        hdr("SPRINT HISTORY  (view 4)"),
+        key("j / k  ↑ / ↓", "Select sprint"),
         sep(),
         hdr("FORMS"),
         key("Tab / Shift-Tab", "Next / previous field"),
-        key("h / l  in status", "Cycle status value"),
-        key("Space  in active toggle", "Toggle yes / no"),
+        key("h / l  in Status field", "Cycle status value"),
+        key("Space  in Active field", "Toggle yes / no"),
         key("Enter", "Save"),
-        key("Esc", "Cancel"),
+        key("Esc", "Cancel / close dropdown"),
+        sep(),
+        hdr("SUBTASKS  (in issue form)"),
+        key("j / k", "Navigate subtasks"),
+        key("e / i", "Edit selected subtask title"),
+        key("] / [", "Advance / regress subtask status"),
+        key("x", "Remove subtask (applied on save)"),
+        key("Ctrl-N", "Add new subtask"),
+        key("Esc", "Return focus to form fields"),
+        sep(),
+        hdr("TRASH  (T key)"),
+        key("j / k  ↑ / ↓", "Navigate"),
+        key("r", "Restore selected issue"),
+        key("D", "Permanently delete (cannot undo)"),
+        key("Esc", "Close"),
         sep(),
         hdr("DELETE CONFIRM"),
-        key("d", "Confirm delete"),
+        key("d", "Confirm move to trash"),
         key("n / Esc", "Cancel"),
     ];
 

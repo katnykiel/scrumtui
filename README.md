@@ -16,13 +16,14 @@ A minimal, local, terminal-based scrum board driven by keyboard shortcuts.
 
 `scrumtui` is a lightweight personal scrum system that lives entirely on your machine. There is no server, no account, no browser. Everything is stored in a single SQLite file at `~/.scrumtui.db`. The UI runs in your terminal using [ratatui](https://github.com/ratatui-org/ratatui).
 
-It has three views:
+It has four views:
 
 | View | Key | Description |
 |------|-----|-------------|
 | **Backlog** | `1` | Full issue list, sprint at the top. Create, edit, delete, and move issues. |
 | **Kanban** | `2` | Three-column board (TODO / IN PROGRESS / DONE) for the active sprint. |
 | **Gantt** | `3` | Timeline chart grouped by epic, with bar per issue. |
+| **Sprint History** | `4` | Browse all past and current sprints with per-sprint issue lists and stats. |
 
 The sprint manager (opened with `S`) includes a live **burnup chart** showing ideal vs. actual story-point completion over the sprint period.
 
@@ -51,7 +52,7 @@ On the very first run, the database is empty and **sample data is loaded automat
 
 | Key | Action |
 |-----|--------|
-| `1` / `2` / `3` | Switch to Backlog / Kanban / Gantt |
+| `1` / `2` / `3` / `4` | Switch to Backlog / Kanban / Gantt / Sprint History |
 | `q` or `Ctrl-C` | Quit |
 | `?` | Open / close the help overlay |
 
@@ -61,6 +62,9 @@ On the very first run, the database is empty and **sample data is loaded automat
 |-----|--------|
 | `j` / `k` or `↓` / `↑` | Move selection down / up |
 | `g` / `G` | Jump to first / last issue |
+| `Ctrl-D` / `Ctrl-U` or `PageDown` / `PageUp` | Jump down / up 10 items |
+| `R` | Move selected issue up in priority (rank) |
+| `r` | Move selected issue down in priority (rank) |
 | `>` or `.` | Advance selected issue / subtask to next status |
 | `<` or `,` | Regress selected issue / subtask to previous status |
 | `n` | Create a new issue |
@@ -69,8 +73,8 @@ On the very first run, the database is empty and **sample data is loaded automat
 | `T` | Open the trash to restore or permanently delete issues |
 | `s` | Toggle the selected issue in/out of the active sprint |
 | `S` | Open the sprint manager (create or edit the sprint, view burnup) |
-| `/` | Start search filter |
-| `c` | Toggle showing completed issues |
+| `/` | Start search / filter |
+| `c` | Toggle showing / hiding completed issues |
 
 The sprint is shown at the top with a box around it. Issues below the sprint box are in the backlog. Subtasks are shown indented beneath their parent issue.
 
@@ -131,6 +135,54 @@ When you delete an issue it is moved to the trash (not permanently removed). Ope
 
 When you press `d` on an issue, a confirmation popup appears. Press `d` again to move it to trash, or `n` / `Esc` to cancel.
 
+### Sprint history view
+
+Press `4` to open the sprint history. The left panel lists all sprints (active sprint marked with `●`). Use `j`/`k` to move between sprints. The right panel shows the selected sprint's issues, completion stats, and duration.
+
+---
+
+## CLI
+
+All commands operate on `~/.scrumtui.db` directly without opening the TUI.
+
+```bash
+# Create a new issue
+scrumtui add "Fix login bug" -e auth -p 2 -d 2026-06-15 --sprint
+
+# Change an issue's status
+scrumtui status 42 done
+
+# List open issues
+scrumtui list
+
+# List all issues including done, filtered to active sprint
+scrumtui list --all --sprint
+
+# Import from Jira CSV export
+scrumtui import export.csv
+
+# Export to markdown
+scrumtui export issues.md
+```
+
+### `add` flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-e` / `--epic` | `general` | Epic label |
+| `-p` / `--points` | `1` | Story points |
+| `-s` / `--status` | `todo` | Initial status: `todo` \| `ip` \| `done` |
+| `-d` / `--due` | — | Due date (`YYYY-MM-DD`) |
+| `--sprint` | — | Add directly to the active sprint |
+
+### `list` flags
+
+| Flag | Description |
+|------|-------------|
+| `--all` | Include done issues |
+| `--sprint` | Only show active sprint issues |
+| `-s` / `--status` | Filter by status: `todo` \| `ip` \| `done` |
+
 ---
 
 ## Issue fields
@@ -141,7 +193,7 @@ When you press `d` on an issue, a confirmation popup appears. Press `d` again to
 | Story Points | ✓ | Any positive number, including decimals (e.g. `0.5`, `2.5`) |
 | Epic | ✓ | Free text label for grouping (e.g. `dft`, `writing`). Autocompletes from existing epics. |
 | Status | ✓ | TODO / IN PROGRESS / DONE. Auto-managed when subtasks exist. |
-| Due Date | — | Format: `YYYY-MM-DD` |
+| Due Date | — | Format: `YYYY-MM-DD`. Tab to the field to see a dropdown of existing dates (today always first). |
 | Description | — | Free text; shown in the detail pane at the bottom of the backlog |
 | Subtasks | — | Independent sub-items with their own status; no story points. Created in the form's Subtasks section. |
 
@@ -152,7 +204,7 @@ All changes are written to the SQLite database immediately on save.
 ## Data
 
 - **Database**: `~/.scrumtui.db` (SQLite, auto-created on first run)
-- **Tables**: `issues`, `sprints`
+- **Tables**: `issues`, `sprints`, `settings`
 - Each issue records `created_at`, `updated_at`, and `completed_at` (set automatically when status becomes DONE)
 - The burnup chart in the sprint manager uses `completed_at` to compute actual daily progress
 
@@ -161,5 +213,5 @@ All changes are written to the SQLite database immediately on save.
 ## Limitations / known gaps
 
 - Only one sprint can be active at a time
-- No export, no sync, no notifications
+- No sync, no notifications
 - The terminal must be at least ~100 columns wide for the full layout to render cleanly

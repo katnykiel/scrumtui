@@ -95,10 +95,16 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 )))
             }
-            BacklogItem::SprintFooter => ListItem::new(Line::from(Span::styled(
-                "  └───────────────────────────────────────────────────────────────",
-                Style::default().fg(Color::Magenta),
-            ))),
+            BacklogItem::SprintFooter => {
+                // Draw a footer line that fills the available list width minus the 2-char
+                // border so it never overflows or looks truncated at any terminal width.
+                let inner_w = area.width.saturating_sub(2) as usize;
+                let dashes = "─".repeat(inner_w.saturating_sub(3)); // "  └" = 3 chars
+                ListItem::new(Line::from(Span::styled(
+                    format!("  └{dashes}"),
+                    Style::default().fg(Color::Magenta),
+                )))
+            }
             BacklogItem::BacklogHeader => ListItem::new(Line::from(Span::styled(
                 "  ── BACKLOG ──────────────────────────────────────────────────",
                 Style::default()
@@ -169,7 +175,7 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
                     Span::raw(" "),
                 ]))
                 .title_bottom(Line::from(Span::styled(
-                    " [n]ew  [e]dit  [d]trash  [T]view trash  [>/<]status  [s]print  [S]mgr  [/]search  [?]help ",
+                    " [n]ew  [e]edit  [d]trash  [T]trash view  []/[]status  [s]print  [S]mgr  [/]search  [c]done  [g/G]top/bot  [u]undo  [?]help ",
                     Style::default().fg(Color::DarkGray),
                 )))
                 .border_style(Style::default().fg(Color::Rgb(80, 80, 120))),
@@ -240,11 +246,11 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("  due ", Style::default().fg(Color::DarkGray)),
             Span::styled(format!("{:<12}", due_str), Style::default().fg(Color::Yellow)),
             Span::styled("  created ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:<17}", created), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:<17}", created), Style::default().fg(Color::Gray)),
             Span::styled("  updated ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:<17}", updated), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:<17}", updated), Style::default().fg(Color::Gray)),
             Span::styled("  done ", Style::default().fg(Color::DarkGray)),
-            Span::styled(completed, Style::default().fg(Color::DarkGray)),
+            Span::styled(completed, Style::default().fg(Color::Gray)),
         ]),
     ];
 

@@ -19,6 +19,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use app::App;
 use db::Db;
+use models::Status;
 
 fn main() -> Result<()> {
     let db_path = {
@@ -47,13 +48,148 @@ fn main() -> Result<()> {
             println!("Exported to {out_path}");
             return Ok(());
         }
+
+        // ── scrumtui add "Title" [-e epic] [-p points] [-s status] [-d YYYY-MM-DD] [--sprint]
+        Some("add") => {
+            let db = Db::open(&db_path)?;
+            let title = args.get(2).cloned().unwrap_or_else(|| {
+                eprintln!("Usage: scrumtui add \"Issue title\" [-e epic] [-p points] [-s todo|ip|done] [-d YYYY-MM-DD] [--sprint]");
+                std::process::exit(1);
+            });
+            let mut epic = String::from("general");
+            let mut points: f64 = 1.0;
+            let mut status = Status::Todo;
+            let mut due_date: Option<chrono::NaiveDate> = None;
+            let mut add_to_sprint = false;
+
+            let mut i = 3usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "-e" | "--epic" => {
+                        epic = args.get(i + 1).cloned().unwrap_or_default();
+                        i += 2;
+                    }
+                    "-p" | "--points" => {
+                        points = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                        i += 2;
+                    }
+                    "-s" | "--status" => {
+                        status = match args.get(i + 1).map(|s| s.to_lowercase()).as_deref() {
+                            Some("ip") | Some("in-progress") | Some("inprogress") => Status::InProgress,
+                            Some("done") => Status::Done,
+                            _ => Status::Todo,
+                        };
+                        i += 2;
+                    }
+                    "-d" | "--due" => {
+                        due_date = args.get(i + 1).and_then(|s| {
+                            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+                        });
+                        i += 2;
+                    }
+                    "--sprint" => {
+                        add_to_sprint = true;
+                        i += 1;
+                    }
+                    _ => { i += 1; }
+                }
+            }
+
+            let id = db.create_issue(&title, points, &epic, &status, due_date, None)?;
+
+            if add_to_sprint {
+                if let Some(sprint) = db.get_active_sprint()? {
+                    db.set_issue_sprint(id, Some(sprint.id))?;
+                    println!("Created issue #{id}: {title:?}  (added to sprint \"{}\")", sprint.name);
+                } else {
+                    println!("Created issue #{id}: {title:?}  (no active sprint — use scrumtui to create one)");
+                }
+            } else {
+                println!("Created issue #{id}: {title:?}");
+            }
+            return Ok(());
+        }
+
+        // ── scrumtui status <id> <todo|ip|done>
+        Some("status") => {
+            let id: i64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                eprintln!("Usage: scrumtui status <id> <todo|ip|done>");
+                std::process::exit(1);
+            });
+            let new_status = match args.get(3).map(|s| s.to_lowercase()).as_deref() {
+                Some("ip") | Some("in-progress") | Some("inprogress") => Status::InProgress,
+                Some("done") => Status::Done,
+                Some("todo") => Status::Todo,
+                _ => {
+                    eprintln!("Usage: scrumtui status <id> <todo|ip|done>");
+                    std::process::exit(1);
+                }
+            };
+            let db = Db::open(&db_path)?;
+            let issue = db.get_issue(id)?;
+            db.update_issue_status(id, &new_status)?;
+            println!("Issue #{id} \"{}\": {} → {}", issue.title, issue.status.label(), new_status.label());
+            return Ok(());
+        }
+
+        // ── scrumtui list [--all] [--sprint] [--status todo|ip|done]
+        Some("list") => {
+            let db = Db::open(&db_path)?;
+            let show_all = args.iter().any(|a| a == "--all");
+            let sprint_only = args.iter().any(|a| a == "--sprint");
+            let status_filter: Option<Status> = args.windows(2).find_map(|w| {
+                if w[0] == "--status" || w[0] == "-s" {
+                    match w[1].to_lowercase().as_str() {
+                        "ip" | "in-progress" => Some(Status::InProgress),
+                        "done" => Some(Status::Done),
+                        "todo" => Some(Status::Todo),
+                        _ => None,
+                    }
+                } else { None }
+            });
+
+            let issues = db.get_all_issues()?;
+            let active_sprint = db.get_active_sprint()?;
+
+            let filtered: Vec<_> = issues.iter().filter(|i| {
+                if i.parent_id.is_some() { return false; } // skip subtasks
+                if !show_all && i.status == Status::Done { return false; }
+                if sprint_only {
+                    if let Some(ref s) = active_sprint {
+                        if i.sprint_id != Some(s.id) { return false; }
+                    } else {
+                        return false;
+                    }
+                }
+                if let Some(ref sf) = status_filter {
+                    if &i.status != sf { return false; }
+                }
+                true
+            }).collect();
+
+            if filtered.is_empty() {
+                println!("No issues.");
+                return Ok(());
+            }
+
+            // Print a simple table
+            println!("{:<5}  {:<3}  {:<8}  {:<14}  {}", "ID", "SP", "STATUS", "EPIC", "TITLE");
+            println!("{}", "─".repeat(72));
+            for issue in filtered {
+                println!(
+                    "{:<5}  {:>3}  {:<8}  {:<14}  {}",
+                    issue.id,
+                    models::format_sp(issue.story_points),
+                    issue.status.label(),
+                    trunc_str(&issue.epic, 14),
+                    trunc_str(&issue.title, 40),
+                );
+            }
+            return Ok(());
+        }
+
         Some("help") | Some("--help") | Some("-h") => {
-            println!("scrumtui — local terminal scrum board");
-            println!();
-            println!("USAGE:");
-            println!("  scrumtui                      open the TUI");
-            println!("  scrumtui import <path.csv>    import Jira CSV");
-            println!("  scrumtui export [output.md]   export to markdown (default: scrumtui-export.md)");
+            print_help();
             return Ok(());
         }
         _ => {}
@@ -94,6 +230,39 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn trunc_str(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", chars[..max.saturating_sub(1)].iter().collect::<String>())
+    }
+}
+
+fn print_help() {
+    println!("scrumtui — local terminal scrum board");
+    println!();
+    println!("USAGE:");
+    println!("  scrumtui                           open the TUI");
+    println!("  scrumtui add \"Title\" [flags]       create a new issue");
+    println!("  scrumtui status <id> <todo|ip|done> change an issue's status");
+    println!("  scrumtui list [flags]               list issues");
+    println!("  scrumtui import <path.csv>          import Jira CSV");
+    println!("  scrumtui export [output.md]         export to markdown");
+    println!();
+    println!("ADD FLAGS:");
+    println!("  -e, --epic <name>      epic label (default: general)");
+    println!("  -p, --points <n>       story points (default: 1)");
+    println!("  -s, --status <s>       initial status: todo | ip | done (default: todo)");
+    println!("  -d, --due <YYYY-MM-DD> due date");
+    println!("  --sprint               add to active sprint");
+    println!();
+    println!("LIST FLAGS:");
+    println!("  --all                  include done issues");
+    println!("  --sprint               only show active sprint issues");
+    println!("  -s, --status <s>       filter by status: todo | ip | done");
 }
 
 fn run_app<B: ratatui::backend::Backend>(

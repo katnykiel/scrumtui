@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{Local, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
+use std::time::Instant;
 
 use crate::db::Db;
 use crate::models::{Issue, Sprint, Status};
@@ -13,6 +14,7 @@ pub enum View {
     Backlog,
     Kanban,
     Gantt,
+    SprintHistory,
 }
 
 // ── Backlog display items ─────────────────────────────────────────────────────
@@ -53,6 +55,10 @@ pub struct IssueForm {
     pub epic_dropdown_open: bool,
     /// Selected row in the epic dropdown.
     pub epic_dropdown_sel: usize,
+    /// Whether the due-date autocomplete dropdown is visible.
+    pub due_date_dropdown_open: bool,
+    /// Selected row in the due-date dropdown.
+    pub due_date_dropdown_sel: usize,
     /// Subtasks (only populated when editing an existing issue).
     pub subtasks: Vec<SubtaskDraft>,
     /// Selected row in the subtask list.
@@ -77,6 +83,8 @@ impl IssueForm {
             error: None,
             epic_dropdown_open: false,
             epic_dropdown_sel: 0,
+            due_date_dropdown_open: false,
+            due_date_dropdown_sel: 0,
             subtasks: Vec::new(),
             subtask_sel: 0,
             in_subtask_list: false,
@@ -97,6 +105,8 @@ impl IssueForm {
             error: None,
             epic_dropdown_open: false,
             epic_dropdown_sel: 0,
+            due_date_dropdown_open: false,
+            due_date_dropdown_sel: 0,
             subtasks: Vec::new(),
             subtask_sel: 0,
             in_subtask_list: false,
@@ -223,12 +233,46 @@ pub enum Popup {
     Help,
 }
 
+// ── Undo ─────────────────────────────────────────────────────────────────────
+
+/// Captures enough state to reverse a single user action.
+#[derive(Clone)]
+pub enum UndoAction {
+    /// A status-only change: restore the old status (and completed_at) on one issue.
+    StatusChange {
+        issue_id: i64,
+        old_status: Status,
+        /// Parent id — if set, cascade update_parent_status_from_children after undo.
+        parent_id: Option<i64>,
+    },
+    /// Full issue edit or create — restore the previous Issue snapshot (and its subtasks).
+    IssueSnapshot {
+        /// The full Issue row before the edit.  None = issue was newly created (undo = soft-delete).
+        before: Option<Issue>,
+        /// Subtask snapshots before the edit (empty for creates).
+        subtasks_before: Vec<Issue>,
+        /// Newly created subtask ids that should be soft-deleted on undo.
+        new_subtask_ids: Vec<i64>,
+    },
+    /// Issue was soft-deleted — undo by restoring from trash.
+    SoftDelete { issue_id: i64 },
+    /// Sprint membership toggled — undo by toggling back.
+    SprintToggle { issue_id: i64, old_sprint_id: Option<i64> },
+    /// Two issues had their ranks swapped.
+    RankSwap { id_a: i64, id_b: i64 },
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 
 pub struct App {
     pub view: View,
     pub db: Db,
     pub issues: Vec<Issue>,
+    /// Stable display snapshot — order and membership are frozen for the current
+    /// view session.  Only statuses are patched in-place when the user changes
+    /// them.  The snapshot is refreshed when the user switches to a different
+    /// view, so disappearances and reorderings are deferred until then.
+    pub display_issues: Vec<Issue>,
     pub active_sprint: Option<Sprint>,
     /// Index into the flat display list produced by `backlog_items()`
     pub backlog_sel: usize,
@@ -240,21 +284,40 @@ pub struct App {
     pub gantt_scroll: usize,
     pub popup: Option<Popup>,
     pub status_msg: Option<String>,
+    /// When the current status_msg was set (for auto-expiry).
+    pub status_msg_at: Option<Instant>,
     /// Whether to show Done issues in the backlog.
     pub show_completed: bool,
     /// Live search query (empty = no filter).
     pub search_query: String,
     /// Whether the search bar is in focus / receiving input.
     pub search_active: bool,
+    /// Sprint history: list of all sprints (loaded when view opens).
+    pub history_sprints: Vec<crate::models::Sprint>,
+    /// Sprint history: selected sprint index.
+    pub history_sel: usize,
+    /// Sprint history: issues for the selected sprint (loaded on selection change).
+    pub history_issues: Vec<Issue>,
+    /// Undo stack — up to 50 entries, most-recent last (pop from end).
+    pub undo_stack: Vec<UndoAction>,
 }
 
 impl App {
     pub fn new(db: Db) -> Result<Self> {
         let issues = db.get_all_issues()?;
         let active_sprint = db.get_active_sprint()?;
+        // Restore persisted show_completed preference (defaults to true)
+        let show_completed = db
+            .get_setting("show_completed")
+            .ok()
+            .flatten()
+            .map(|v| v != "false")
+            .unwrap_or(true);
+        let display_issues = issues.clone();
         Ok(App {
             view: View::Backlog,
             db,
+            display_issues,
             issues,
             active_sprint,
             backlog_sel: 0,
@@ -263,9 +326,14 @@ impl App {
             gantt_scroll: 0,
             popup: None,
             status_msg: None,
-            show_completed: true,
+            status_msg_at: None,
+            show_completed,
             search_query: String::new(),
             search_active: false,
+            history_sprints: Vec::new(),
+            history_sel: 0,
+            history_issues: Vec::new(),
+            undo_stack: Vec::new(),
         })
     }
 
@@ -280,17 +348,168 @@ impl App {
         Ok(())
     }
 
+    /// Refresh display_issues from the live issues list.  Called on view switch
+    /// so that order/visibility changes take effect when leaving a view.
+    pub fn flush_display(&mut self) {
+        self.display_issues = self.issues.clone();
+    }
+
+    /// Patch the status (and completed_at) of an issue in display_issues without
+    /// changing its position or removing it.  This lets the user see the new
+    /// status symbol immediately while keeping the item in place.
+    fn patch_display_status(&mut self, issue_id: i64, new_status: &Status) {
+        if let Some(entry) = self.display_issues.iter_mut().find(|i| i.id == issue_id) {
+            let now = chrono::Local::now().naive_local();
+            entry.completed_at = if new_status == &Status::Done {
+                Some(now)
+            } else {
+                None
+            };
+            entry.status = new_status.clone();
+        }
+    }
+
+    /// Set a status message that will display for ~3 seconds.
+    pub fn set_status(&mut self, msg: impl Into<String> + std::fmt::Display) {
+        self.status_msg = Some(msg.to_string());
+        self.status_msg_at = Some(Instant::now());
+    }
+
+    /// Returns the current status message if it hasn't expired (3 s TTL).
+    pub fn current_status(&self) -> Option<&str> {
+        match (&self.status_msg, &self.status_msg_at) {
+            (Some(msg), Some(at)) if at.elapsed().as_secs() < 3 => Some(msg),
+            _ => None,
+        }
+    }
+
+    /// Push an action onto the undo stack (capped at 50).
+    fn push_undo(&mut self, action: UndoAction) {
+        if self.undo_stack.len() >= 50 {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(action);
+    }
+
+    /// Pop the most recent undo entry and reverse it.
+    pub fn undo(&mut self) {
+        let action = match self.undo_stack.pop() {
+            Some(a) => a,
+            None => {
+                self.set_status("Nothing to undo.");
+                return;
+            }
+        };
+        match action {
+            UndoAction::StatusChange { issue_id, old_status, parent_id } => {
+                if let Err(e) = self.db.update_issue_status(issue_id, &old_status) {
+                    self.set_status(format!("Undo failed: {e}"));
+                    return;
+                }
+                if let Some(pid) = parent_id {
+                    let _ = self.db.update_parent_status_from_children(pid);
+                }
+                let _ = self.reload();
+                // Patch display so the status symbol reverts immediately in-view
+                self.patch_display_status(issue_id, &old_status);
+                if let Some(pid) = parent_id {
+                    if let Some(parent) = self.issues.iter().find(|i| i.id == pid).cloned() {
+                        self.patch_display_status(pid, &parent.status);
+                    }
+                }
+                self.set_status(format!("Undid status change → {}", old_status.label()));
+            }
+            UndoAction::IssueSnapshot { before, subtasks_before, new_subtask_ids } => {
+                match before {
+                    None => {
+                        // Issue was newly created — find it by checking the most recently
+                        // inserted id that matches. We track via new_subtask_ids and the
+                        // snapshot: the issue id is encoded as the first element of new_subtask_ids
+                        // with a sentinel, or we look at the last created issue.
+                        // Actually simpler: we embedded the id in new_subtask_ids[0] using
+                        // a convention — see push sites. For "create" undos we store the
+                        // new issue id in new_subtask_ids[0] with a negative sign as sentinel.
+                        // Let's handle it: the first entry is the new issue id.
+                        if let Some(&new_id) = new_subtask_ids.first() {
+                            if let Err(e) = self.db.delete_issue(new_id) {
+                                self.set_status(format!("Undo failed: {e}"));
+                                return;
+                            }
+                        }
+                        let _ = self.reload();
+                        self.flush_display();
+                        self.set_status("Undid issue creation (moved to trash).");
+                    }
+                    Some(snapshot) => {
+                        // Restore the issue row to its prior state
+                        let due = snapshot.due_date;
+                        let desc = snapshot.description.as_deref();
+                        if let Err(e) = self.db.restore_issue_to_snapshot(&snapshot) {
+                            self.set_status(format!("Undo failed: {e}"));
+                            return;
+                        }
+                        // Restore each previous subtask
+                        for sub in &subtasks_before {
+                            let _ = self.db.restore_issue_to_snapshot(sub);
+                        }
+                        // Soft-delete any subtasks that were newly created in that edit
+                        for id in &new_subtask_ids {
+                            let _ = self.db.delete_issue(*id);
+                        }
+                        let _ = self.reload();
+                        self.flush_display();
+                        let _ = due; let _ = desc; // suppress unused warnings
+                        self.set_status("Undid issue edit.");
+                    }
+                }
+            }
+            UndoAction::SoftDelete { issue_id } => {
+                if let Err(e) = self.db.restore_issue(issue_id) {
+                    self.set_status(format!("Undo failed: {e}"));
+                    return;
+                }
+                let _ = self.reload();
+                self.flush_display();
+                self.set_status("Undid delete (issue restored).");
+            }
+            UndoAction::SprintToggle { issue_id, old_sprint_id } => {
+                if let Err(e) = self.db.set_issue_sprint(issue_id, old_sprint_id) {
+                    self.set_status(format!("Undo failed: {e}"));
+                    return;
+                }
+                let _ = self.reload();
+                self.flush_display();
+                self.set_status(if old_sprint_id.is_some() {
+                    "Undid sprint removal (back in sprint)."
+                } else {
+                    "Undid sprint add (back in backlog)."
+                });
+            }
+            UndoAction::RankSwap { id_a, id_b } => {
+                if let Err(e) = self.db.swap_rank(id_a, id_b) {
+                    self.set_status(format!("Undo failed: {e}"));
+                    return;
+                }
+                let _ = self.reload();
+                self.flush_display();
+                self.set_status("Undid rank change.");
+            }
+        }
+    }
+
     // ── Derived data ───────────────────────────────────────────────────────────
 
     /// Build the flat display list for the backlog view, respecting filters.
+    /// Uses display_issues (stable snapshot) so order and visibility don't
+    /// change mid-session when statuses are updated.
     pub fn backlog_items(&self) -> Vec<BacklogItem> {
         let mut items: Vec<BacklogItem> = Vec::new();
         let q = self.search_query.to_lowercase();
 
-        // Build children lookup: parent_id → Vec<Issue>
+        // Build children lookup from the stable snapshot: parent_id → Vec<Issue>
         let mut children_map: std::collections::HashMap<i64, Vec<Issue>> =
             std::collections::HashMap::new();
-        for issue in &self.issues {
+        for issue in &self.display_issues {
             if let Some(pid) = issue.parent_id {
                 children_map.entry(pid).or_default().push(issue.clone());
             }
@@ -323,7 +542,7 @@ impl App {
         if let Some(sprint) = &self.active_sprint {
             // Sprint issues: always show Done; search filter still applies
             let sprint_issues: Vec<Issue> = self
-                .issues
+                .display_issues
                 .iter()
                 .filter(|i| i.sprint_id == Some(sprint.id) && i.parent_id.is_none())
                 .filter(|i| search_matches(i))
@@ -339,7 +558,7 @@ impl App {
         }
 
         let backlog: Vec<Issue> = self
-            .issues
+            .display_issues
             .iter()
             .filter(|i| {
                 let in_sprint = self.active_sprint.as_ref().map(|s| i.sprint_id == Some(s.id)).unwrap_or(false);
@@ -369,7 +588,7 @@ impl App {
         match items.get(self.backlog_sel) {
             Some(BacklogItem::Issue(issue, _)) => Some(issue.clone()),
             Some(BacklogItem::Subtask(sub, _)) => {
-                sub.parent_id.and_then(|pid| self.issues.iter().find(|i| i.id == pid).cloned())
+                sub.parent_id.and_then(|pid| self.display_issues.iter().find(|i| i.id == pid).cloned())
             }
             _ => None,
         }
@@ -380,17 +599,32 @@ impl App {
         self.issues.iter().find(|i| i.id == id)
     }
 
+    /// The issue currently selected in the kanban view (if any).
+    pub fn selected_kanban_issue(&self) -> Option<Issue> {
+        let col = self.kanban_col;
+        let status = match col {
+            0 => &crate::models::Status::Todo,
+            1 => &crate::models::Status::InProgress,
+            2 => &crate::models::Status::Done,
+            _ => return None,
+        };
+        let issues = self.sprint_issues_by_status(status);
+        let row = self.kanban_rows[col];
+        issues.get(row).cloned()
+    }
+
     /// All subtasks whose parent is in the active sprint, by status.
+    /// Uses display_issues for stable kanban column membership.
     fn sprint_subtasks_by_status(&self, status: &Status) -> Vec<Issue> {
         match &self.active_sprint {
             Some(s) => {
                 let sprint_parent_ids: std::collections::HashSet<i64> = self
-                    .issues
+                    .display_issues
                     .iter()
                     .filter(|i| i.sprint_id == Some(s.id) && i.parent_id.is_none())
                     .map(|i| i.id)
                     .collect();
-                self.issues
+                self.display_issues
                     .iter()
                     .filter(|i| {
                         i.parent_id.is_some()
@@ -407,10 +641,11 @@ impl App {
     }
 
     /// Sprint issues by status for kanban — top-level issues + subtasks whose parent is in sprint.
+    /// Uses display_issues for stable column membership and ordering.
     pub fn sprint_issues_by_status(&self, status: &Status) -> Vec<Issue> {
         let mut items = match &self.active_sprint {
             Some(s) => self
-                .issues
+                .display_issues
                 .iter()
                 .filter(|i| i.sprint_id == Some(s.id) && &i.status == status && i.parent_id.is_none())
                 .cloned()
@@ -458,6 +693,29 @@ impl App {
             .collect();
         epics.sort();
         epics
+    }
+
+    /// Today's date as "YYYY-MM-DD" for the due-date autocomplete.
+    pub fn today_str(&self) -> String {
+        Local::now().format("%Y-%m-%d").to_string()
+    }
+
+    /// Unique due dates across all issues, sorted ascending, with today always first.
+    pub fn due_dates(&self) -> Vec<String> {
+        let today = self.today_str();
+        let mut dates: Vec<String> = self
+            .issues
+            .iter()
+            .filter_map(|i| i.due_date.map(|d| d.format("%Y-%m-%d").to_string()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        // Sort dates after removing today (we always push it first)
+        dates.retain(|d| d != &today);
+        dates.sort();
+        let mut result = vec![today];
+        result.extend(dates);
+        result
     }
 
     // ── Navigation helpers ─────────────────────────────────────────────────────
@@ -543,7 +801,11 @@ impl App {
             return self.handle_popup_key(key);
         }
 
-        // Search bar intercepts typing when active
+        // Search bar intercepts typing when active (backlog only — clear it if we switched view)
+        if self.search_active && self.view != View::Backlog {
+            self.search_active = false;
+            self.search_query.clear();
+        }
         if self.search_active {
             match key.code {
                 KeyCode::Esc => {
@@ -574,21 +836,38 @@ impl App {
 
         // Global keys
         match key.code {
+            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.undo();
+                return false;
+            }
+            KeyCode::Char('u') => {
+                self.undo();
+                return false;
+            }
             KeyCode::Char('q') => return true,
             KeyCode::Char('?') => {
                 self.popup = Some(Popup::Help);
                 return false;
             }
             KeyCode::Char('1') => {
+                if self.view != View::Backlog { self.flush_display(); }
                 self.view = View::Backlog;
                 return false;
             }
             KeyCode::Char('2') => {
+                if self.view != View::Kanban { self.flush_display(); }
                 self.view = View::Kanban;
                 return false;
             }
             KeyCode::Char('3') => {
+                if self.view != View::Gantt { self.flush_display(); }
                 self.view = View::Gantt;
+                return false;
+            }
+            KeyCode::Char('4') => {
+                self.flush_display();
+                self.load_sprint_history();
+                self.view = View::SprintHistory;
                 return false;
             }
             _ => {}
@@ -598,6 +877,7 @@ impl App {
             View::Backlog => self.handle_backlog_key(key),
             View::Kanban => self.handle_kanban_key(key),
             View::Gantt => self.handle_gantt_key(key),
+            View::SprintHistory => self.handle_history_key(key),
         }
 
         false
@@ -619,6 +899,10 @@ impl App {
             }
             KeyCode::Char('c') => {
                 self.show_completed = !self.show_completed;
+                let _ = self.db.set_setting(
+                    "show_completed",
+                    if self.show_completed { "true" } else { "false" },
+                );
                 let len = self.backlog_items().len();
                 if self.backlog_sel >= len && len > 0 {
                     self.backlog_sel = len - 1;
@@ -659,18 +943,24 @@ impl App {
                         } else {
                             Some(sprint.id)
                         };
+                        self.push_undo(UndoAction::SprintToggle {
+                            issue_id: issue.id,
+                            old_sprint_id: issue.sprint_id,
+                        });
                         if let Err(e) = self.db.set_issue_sprint(issue.id, new_sprint_id) {
-                            self.status_msg = Some(format!("Error: {e}"));
+                            self.undo_stack.pop(); // rollback the push on error
+                            self.set_status(format!("Error: {e}"));
                         } else {
                             let _ = self.reload();
-                            self.status_msg = if new_sprint_id.is_some() {
-                                Some("Moved to sprint.".into())
+                            self.flush_display();
+                            self.set_status(if new_sprint_id.is_some() {
+                                "Moved to sprint."
                             } else {
-                                Some("Moved to backlog.".into())
-                            };
+                                "Moved to backlog."
+                            });
                         }
                     } else {
-                        self.status_msg = Some("No active sprint. Press S to create one.".into());
+                        self.set_status("No active sprint. Press S to create one.");
                     }
                 }
             }
@@ -684,16 +974,73 @@ impl App {
             KeyCode::Char('T') => {
                 match self.db.get_trash() {
                     Ok(items) => self.popup = Some(Popup::Trash { items, sel: 0 }),
-                    Err(e) => self.status_msg = Some(format!("Error: {e}")),
+                    Err(e) => self.set_status(format!("Error: {e}")),
                 }
             }
-            KeyCode::Char('>') | KeyCode::Char('.') => {
+            KeyCode::Char(']') => {
                 self.backlog_advance_status(1);
             }
-            KeyCode::Char('<') | KeyCode::Char(',') => {
+            KeyCode::Char('[') => {
                 self.backlog_advance_status(-1);
             }
+            KeyCode::Char('R') => {
+                self.backlog_move_rank(-1); // move selected issue up (higher priority)
+            }
+            KeyCode::Char('r') => {
+                self.backlog_move_rank(1); // move selected issue down (lower priority)
+            }
             _ => {}
+        }
+    }
+
+    /// Move the selected issue up (-1) or down (+1) in rank order.
+    fn backlog_move_rank(&mut self, dir: i32) {
+        let items = self.backlog_items();
+        // Only works on top-level issues (not subtasks, not headers)
+        let current_issue = match items.get(self.backlog_sel) {
+            Some(BacklogItem::Issue(i, _)) => i.clone(),
+            _ => return,
+        };
+
+        // Collect the peer issues (same context: same sprint_id / both backlog)
+        let peers: Vec<Issue> = items.iter().filter_map(|bi| {
+            if let BacklogItem::Issue(i, _) = bi {
+                if i.sprint_id == current_issue.sprint_id {
+                    return Some(i.clone());
+                }
+            }
+            None
+        }).collect();
+
+        let pos = peers.iter().position(|i| i.id == current_issue.id);
+        let pos = match pos {
+            Some(p) => p,
+            None => return,
+        };
+
+        let swap_pos = if dir < 0 {
+            if pos == 0 { return; }
+            pos - 1
+        } else {
+            if pos + 1 >= peers.len() { return; }
+            pos + 1
+        };
+
+        let other = &peers[swap_pos];
+        self.push_undo(UndoAction::RankSwap { id_a: current_issue.id, id_b: other.id });
+        if let Err(e) = self.db.swap_rank(current_issue.id, other.id) {
+            self.undo_stack.pop();
+            self.set_status(format!("Error: {e}"));
+            return;
+        }
+        let _ = self.reload();
+        self.flush_display();
+        // Move the selection to follow the issue
+        let new_items = self.backlog_items();
+        if let Some(new_pos) = new_items.iter().position(|bi| {
+            matches!(bi, BacklogItem::Issue(i, _) if i.id == current_issue.id)
+        }) {
+            self.backlog_sel = new_pos;
         }
     }
 
@@ -703,20 +1050,39 @@ impl App {
         match items.get(self.backlog_sel).cloned() {
             Some(BacklogItem::Issue(issue, _)) => {
                 if self.has_subtasks(issue.id) {
-                    self.status_msg = Some("Status is auto-managed by subtasks.".into());
+                    self.set_status("Status is managed by subtasks.");
                     return;
                 }
                 let new_status = if dir > 0 { issue.status.next() } else { issue.status.prev() };
                 if new_status != issue.status {
+                    self.push_undo(UndoAction::StatusChange {
+                        issue_id: issue.id,
+                        old_status: issue.status.clone(),
+                        parent_id: None,
+                    });
                     let _ = self.db.update_issue_status(issue.id, &new_status);
                     let _ = self.reload();
+                    // Patch display snapshot in-place — keeps position/visibility stable
+                    self.patch_display_status(issue.id, &new_status);
                 }
             }
             Some(BacklogItem::Subtask(sub, _)) => {
                 let new_status = if dir > 0 { sub.status.next() } else { sub.status.prev() };
                 if new_status != sub.status {
+                    self.push_undo(UndoAction::StatusChange {
+                        issue_id: sub.id,
+                        old_status: sub.status.clone(),
+                        parent_id: sub.parent_id,
+                    });
                     let _ = self.db.update_issue_status(sub.id, &new_status);
                     let _ = self.reload();
+                    self.patch_display_status(sub.id, &new_status);
+                    // Also patch parent so its derived status badge updates
+                    if let Some(pid) = sub.parent_id {
+                        if let Some(parent) = self.issues.iter().find(|i| i.id == pid).cloned() {
+                            self.patch_display_status(pid, &parent.status);
+                        }
+                    }
                 }
             }
             _ => {}
@@ -737,39 +1103,51 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => self.kanban_down(),
             KeyCode::Char('k') | KeyCode::Up => self.kanban_up(),
-            KeyCode::Char('>') | KeyCode::Char('.') => {
+            KeyCode::Char(']') => {
                 if let Some(issue) = self.kanban_selected_issue() {
                     if !issue.is_subtask() && self.has_subtasks(issue.id) {
-                        self.status_msg = Some("Status managed by subtasks.".into());
+                        self.set_status("Status is managed by subtasks.");
                     } else {
                         let new_status = issue.status.next();
                         if new_status != issue.status {
+                            self.push_undo(UndoAction::StatusChange {
+                                issue_id: issue.id,
+                                old_status: issue.status.clone(),
+                                parent_id: issue.parent_id,
+                            });
                             let _ = self.db.update_issue_status(issue.id, &new_status);
                             let _ = self.reload();
-                            let col = new_status.index();
-                            self.kanban_col = col;
-                            let len = self.sprint_issues_by_status(&new_status).len();
-                            if self.kanban_rows[col] >= len && len > 0 {
-                                self.kanban_rows[col] = len - 1;
+                            // Patch display in-place — card stays in current column
+                            self.patch_display_status(issue.id, &new_status);
+                            if let Some(pid) = issue.parent_id {
+                                if let Some(parent) = self.issues.iter().find(|i| i.id == pid).cloned() {
+                                    self.patch_display_status(pid, &parent.status);
+                                }
                             }
                         }
                     }
                 }
             }
-            KeyCode::Char('<') | KeyCode::Char(',') => {
+            KeyCode::Char('[') => {
                 if let Some(issue) = self.kanban_selected_issue() {
                     if !issue.is_subtask() && self.has_subtasks(issue.id) {
-                        self.status_msg = Some("Status managed by subtasks.".into());
+                        self.set_status("Status is managed by subtasks.");
                     } else {
                         let new_status = issue.status.prev();
                         if new_status != issue.status {
+                            self.push_undo(UndoAction::StatusChange {
+                                issue_id: issue.id,
+                                old_status: issue.status.clone(),
+                                parent_id: issue.parent_id,
+                            });
                             let _ = self.db.update_issue_status(issue.id, &new_status);
                             let _ = self.reload();
-                            let col = new_status.index();
-                            self.kanban_col = col;
-                            let len = self.sprint_issues_by_status(&new_status).len();
-                            if self.kanban_rows[col] >= len && len > 0 {
-                                self.kanban_rows[col] = len - 1;
+                            // Patch display in-place — card stays in current column
+                            self.patch_display_status(issue.id, &new_status);
+                            if let Some(pid) = issue.parent_id {
+                                if let Some(parent) = self.issues.iter().find(|i| i.id == pid).cloned() {
+                                    self.patch_display_status(pid, &parent.status);
+                                }
                             }
                         }
                     }
@@ -806,6 +1184,43 @@ impl App {
         }
     }
 
+    // ── Sprint history ─────────────────────────────────────────────────────────
+
+    /// Load all sprints and issues for the currently selected one.
+    pub fn load_sprint_history(&mut self) {
+        self.history_sprints = self.db.get_all_sprints().unwrap_or_default();
+        self.history_sel = self.history_sel.min(self.history_sprints.len().saturating_sub(1));
+        self.load_history_issues();
+    }
+
+    fn load_history_issues(&mut self) {
+        if let Some(sprint) = self.history_sprints.get(self.history_sel) {
+            self.history_issues = self.db.get_sprint_issues(sprint.id).unwrap_or_default();
+        } else {
+            self.history_issues = Vec::new();
+        }
+    }
+
+    fn handle_history_key(&mut self, key: KeyEvent) {
+        let len = self.history_sprints.len();
+        if len == 0 { return; }
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.history_sel + 1 < len {
+                    self.history_sel += 1;
+                    self.load_history_issues();
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.history_sel > 0 {
+                    self.history_sel -= 1;
+                    self.load_history_issues();
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_popup_key(&mut self, key: KeyEvent) -> bool {
         match &mut self.popup {
             None => {}
@@ -821,11 +1236,13 @@ impl App {
                 match key.code {
                     KeyCode::Char('d') | KeyCode::Char('D') => {
                         self.popup = None;
+                        self.push_undo(UndoAction::SoftDelete { issue_id: id });
                         if let Err(e) = self.db.delete_issue(id) {
-                            self.status_msg = Some(format!("Error: {e}"));
+                            self.set_status(format!("Error: {e}"));
                         } else {
                             let _ = self.reload();
-                            self.status_msg = Some("Issue moved to trash.".into());
+                            self.flush_display();
+                            self.set_status("Issue moved to trash.");
                         }
                     }
                     KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -851,10 +1268,11 @@ impl App {
                         if let Some(issue) = items.get(*sel).cloned() {
                             self.popup = None;
                             if let Err(e) = self.db.restore_issue(issue.id) {
-                                self.status_msg = Some(format!("Error: {e}"));
+                                self.set_status(format!("Error: {e}"));
                             } else {
                                 let _ = self.reload();
-                                self.status_msg = Some(format!("\"{}\" restored.", issue.title));
+                                self.flush_display();
+                                self.set_status(format!("\"{}\" restored.", issue.title));
                             }
                         }
                     }
@@ -863,7 +1281,7 @@ impl App {
                             let new_sel = sel.saturating_sub(1);
                             self.popup = None;
                             if let Err(e) = self.db.purge_issue(issue.id) {
-                                self.status_msg = Some(format!("Error: {e}"));
+                                self.set_status(format!("Error: {e}"));
                             } else {
                                 // Reopen trash with updated list
                                 match self.db.get_trash() {
@@ -871,9 +1289,9 @@ impl App {
                                         let clamped = new_sel.min(new_items.len().saturating_sub(1));
                                         self.popup = Some(Popup::Trash { items: new_items, sel: clamped });
                                     }
-                                    Err(e) => self.status_msg = Some(format!("Error: {e}")),
+                                    Err(e) => self.set_status(format!("Error: {e}")),
                                 }
-                                self.status_msg = Some(format!("\"{}\" permanently deleted.", issue.title));
+                                self.set_status(format!("\"{}\" permanently deleted.", issue.title));
                             }
                         }
                     }
@@ -909,11 +1327,16 @@ impl App {
                     popup.epic_dropdown_open = false;
                     return;
                 }
+                if popup.due_date_dropdown_open {
+                    popup.due_date_dropdown_open = false;
+                    return;
+                }
                 self.popup = None;
                 return;
             }
             KeyCode::Tab => {
                 popup.epic_dropdown_open = false;
+                popup.due_date_dropdown_open = false;
                 let next = popup.focused_field + 1;
                 if next >= IssueForm::field_count() {
                     // Move focus into subtask list
@@ -922,13 +1345,24 @@ impl App {
                     popup.subtask_editing = false;
                 } else {
                     popup.focused_field = next % IssueForm::field_count();
+                    // Auto-open due-date dropdown when focusing the due field
+                    if popup.focused_field == 4 {
+                        popup.due_date_dropdown_open = true;
+                        popup.due_date_dropdown_sel = 0;
+                    }
                 }
                 return;
             }
             KeyCode::BackTab => {
                 popup.epic_dropdown_open = false;
+                popup.due_date_dropdown_open = false;
                 popup.focused_field =
                     (popup.focused_field + IssueForm::field_count() - 1) % IssueForm::field_count();
+                // Auto-open due-date dropdown when focusing the due field
+                if popup.focused_field == 4 {
+                    popup.due_date_dropdown_open = true;
+                    popup.due_date_dropdown_sel = 0;
+                }
                 return;
             }
             KeyCode::Enter => {
@@ -964,6 +1398,33 @@ impl App {
                     }
                     return;
                 }
+
+                if popup.due_date_dropdown_open {
+                    let q = popup.due_date.to_lowercase();
+                    let today = Local::now().format("%Y-%m-%d").to_string();
+                    let dates: std::collections::HashSet<String> = self
+                        .issues
+                        .iter()
+                        .filter_map(|i| i.due_date.map(|d| d.format("%Y-%m-%d").to_string()))
+                        .collect();
+                    let mut dates: Vec<String> = dates.into_iter().collect();
+                    dates.retain(|d| d != &today);
+                    dates.sort();
+                    let mut matches = vec![today];
+                    matches.extend(dates);
+                    matches.retain(|d| d.contains(&q));
+                    let sel = popup.due_date_dropdown_sel.min(matches.len().saturating_sub(1));
+                    let popup = match &mut self.popup {
+                        Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
+                        _ => return,
+                    };
+                    if let Some(chosen) = matches.into_iter().nth(sel) {
+                        popup.due_date = chosen;
+                    }
+                    popup.due_date_dropdown_open = false;
+                    popup.due_date_dropdown_sel = 0;
+                    return;
+                }
                 // Submit form – need to extract form data first
                 if let Some(err) = popup.validate() {
                     popup.error = Some(err);
@@ -995,6 +1456,25 @@ impl App {
                     popup.subtasks.clone()
                 };
 
+                // ── Snapshot for undo ─────────────────────────────────────────
+                // For edits: snapshot the current issue + its existing subtasks.
+                // For creates: we'll record the new id after insert (stored in new_subtask_ids[0]).
+                let undo_snapshot: Option<UndoAction> = if let Some(id) = editing_id {
+                    let before = self.db.get_issue(id).ok();
+                    let subtasks_before: Vec<Issue> = self.issues.iter()
+                        .filter(|i| i.parent_id == Some(id))
+                        .cloned()
+                        .collect();
+                    // IDs of subtasks that exist now (any not in this list after save = newly created)
+                    Some(UndoAction::IssueSnapshot {
+                        before,
+                        subtasks_before,
+                        new_subtask_ids: Vec::new(), // filled after save
+                    })
+                } else {
+                    None // create: handled after we have the new id
+                };
+
                 self.popup = None;
 
                 // Returns the issue id (new or existing) so we can attach subtasks
@@ -1006,8 +1486,10 @@ impl App {
                 };
 
                 match id_result {
-                    Err(e) => self.status_msg = Some(format!("Error: {e}")),
+                    Err(e) => self.set_status(format!("Error: {e}")),
                     Ok(parent_id) => {
+                        let mut newly_created_subtask_ids: Vec<i64> = Vec::new();
+
                         // Persist subtask drafts (works for both new and edit)
                         for draft in &subtask_drafts {
                             if draft.deleted {
@@ -1019,18 +1501,40 @@ impl App {
                                 let _ = self.db.update_subtask(id, &draft.title, &st);
                             } else if !draft.title.trim().is_empty() {
                                 let st = Status::from_index(draft.status_idx);
-                                let _ = self.db.create_subtask(&draft.title, parent_id, &st);
+                                if let Ok(new_id) = self.db.create_subtask(&draft.title, parent_id, &st) {
+                                    newly_created_subtask_ids.push(new_id);
+                                }
                             }
                         }
                         // Recompute parent status whenever subtasks exist
                         if !subtask_drafts.is_empty() {
                             let _ = self.db.update_parent_status_from_children(parent_id);
                         }
-                        let _ = self.reload();
-                        self.status_msg = Some(if editing_id.is_some() {
-                            "Issue updated.".into()
+
+                        // Push undo entry now that we have all the info
+                        if let Some(UndoAction::IssueSnapshot { before, subtasks_before, .. }) = undo_snapshot {
+                            self.push_undo(UndoAction::IssueSnapshot {
+                                before,
+                                subtasks_before,
+                                new_subtask_ids: newly_created_subtask_ids,
+                            });
                         } else {
-                            "Issue created.".into()
+                            // New issue created: store its id so undo can soft-delete it
+                            self.push_undo(UndoAction::IssueSnapshot {
+                                before: None,
+                                subtasks_before: Vec::new(),
+                                new_subtask_ids: vec![parent_id],
+                            });
+                        }
+
+                        let _ = self.reload();
+                        // Full edit: refresh display snapshot so the saved state
+                        // is immediately reflected (user consciously committed it)
+                        self.flush_display();
+                        self.set_status(if editing_id.is_some() {
+                            "Issue updated."
+                        } else {
+                            "Issue created."
                         });
                     }
                 }
@@ -1113,6 +1617,62 @@ impl App {
                 }
                 _ => {}
             }
+        } else if popup.focused_field == 4 && popup.due_date_dropdown_open {
+            // Due-date dropdown navigation
+            match key.code {
+                KeyCode::Down => {
+                    popup.due_date_dropdown_sel = popup.due_date_dropdown_sel.saturating_add(1);
+                }
+                KeyCode::Up => {
+                    popup.due_date_dropdown_sel = popup.due_date_dropdown_sel.saturating_sub(1);
+                }
+                KeyCode::Tab => {
+                    // Commit then advance field
+                    let q = popup.due_date.to_lowercase();
+                    let today = Local::now().format("%Y-%m-%d").to_string();
+                    let dates: std::collections::HashSet<String> = self
+                        .issues
+                        .iter()
+                        .filter_map(|i| i.due_date.map(|d| d.format("%Y-%m-%d").to_string()))
+                        .collect();
+                    let mut dates: Vec<String> = dates.into_iter().collect();
+                    dates.retain(|d| d != &today);
+                    dates.sort();
+                    let mut matches = vec![today];
+                    matches.extend(dates);
+                    matches.retain(|d| d.contains(&q));
+                    let sel = popup.due_date_dropdown_sel.min(matches.len().saturating_sub(1));
+                    let popup = match &mut self.popup {
+                        Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
+                        _ => return,
+                    };
+                    if let Some(chosen) = matches.into_iter().nth(sel) {
+                        popup.due_date = chosen;
+                    }
+                    popup.due_date_dropdown_open = false;
+                    popup.due_date_dropdown_sel = 0;
+                    popup.focused_field = (popup.focused_field + 1) % IssueForm::field_count();
+                }
+                KeyCode::Esc => {
+                    popup.due_date_dropdown_open = false;
+                }
+                KeyCode::Backspace => {
+                    if key.modifiers.contains(KeyModifiers::ALT) {
+                        delete_word(&mut popup.due_date);
+                    } else {
+                        popup.due_date.pop();
+                    }
+                    // Keep dropdown open — it always shows when field 4 is focused
+                    popup.due_date_dropdown_open = true;
+                    popup.due_date_dropdown_sel = 0;
+                }
+                KeyCode::Char(c) => {
+                    popup.due_date.push(c);
+                    popup.due_date_dropdown_open = true;
+                    popup.due_date_dropdown_sel = 0;
+                }
+                _ => {}
+            }
         } else if let Some(field) = popup.active_text_field() {
             match key.code {
                 KeyCode::Backspace => {
@@ -1126,6 +1686,11 @@ impl App {
                         popup.epic_dropdown_open = !popup.epic.is_empty();
                         popup.epic_dropdown_sel = 0;
                     }
+                    if popup.focused_field == 4 {
+                        // Keep dropdown open — it always shows when field 4 is focused
+                        popup.due_date_dropdown_open = true;
+                        popup.due_date_dropdown_sel = 0;
+                    }
                 }
                 KeyCode::Char(c) => {
                     field.push(c);
@@ -1133,6 +1698,11 @@ impl App {
                     if popup.focused_field == 2 {
                         popup.epic_dropdown_open = true;
                         popup.epic_dropdown_sel = 0;
+                    }
+                    // Open due-date dropdown on any char input in due-date field
+                    if popup.focused_field == 4 {
+                        popup.due_date_dropdown_open = true;
+                        popup.due_date_dropdown_sel = 0;
                     }
                 }
                 _ => {}
@@ -1233,7 +1803,7 @@ impl App {
                 }
                 return;
             }
-            KeyCode::Char(']') | KeyCode::Char('>') | KeyCode::Char('.') => {
+            KeyCode::Char(']') => {
                 // Advance subtask status
                 let vis_idx = popup.subtask_sel;
                 if let Some(st) = popup.subtasks.iter_mut().filter(|s| !s.deleted).nth(vis_idx) {
@@ -1243,7 +1813,7 @@ impl App {
                 }
                 return;
             }
-            KeyCode::Char('[') | KeyCode::Char('<') | KeyCode::Char(',') => {
+            KeyCode::Char('[') => {
                 // Regress subtask status
                 let vis_idx = popup.subtask_sel;
                 if let Some(st) = popup.subtasks.iter_mut().filter(|s| !s.deleted).nth(vis_idx) {
@@ -1323,10 +1893,11 @@ impl App {
                 };
 
                 match result {
-                    Err(e) => self.status_msg = Some(format!("Error: {e}")),
+                    Err(e) => self.set_status(format!("Error: {e}")),
                     Ok(_) => {
                         let _ = self.reload();
-                        self.status_msg = Some("Sprint saved.".into());
+                        self.flush_display();
+                        self.set_status("Sprint saved.");
                     }
                 }
                 return;

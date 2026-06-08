@@ -61,6 +61,44 @@ impl Db {
         let _ = self.conn.execute_batch(
             "ALTER TABLE issues ADD COLUMN deleted_at TEXT;",
         );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE issues ADD COLUMN rank INTEGER NOT NULL DEFAULT 0;",
+        );
+        // Back-fill rank for existing rows so each issue gets a unique rank
+        // equal to its rowid (no-op if already set).
+        let _ = self.conn.execute_batch(
+            "UPDATE issues SET rank = id WHERE rank = 0;",
+        );
+        // Settings table for persisting UI preferences
+        let _ = self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );",
+        );
+        Ok(())
+    }
+
+    // ── Settings ──────────────────────────────────────────────────────────────
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT value FROM settings WHERE key = ?1",
+        )?;
+        let result = stmt.query_row(params![key], |row| row.get(0));
+        match result {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
         Ok(())
     }
 
@@ -69,10 +107,13 @@ impl Db {
     pub fn get_all_issues(&self) -> Result<Vec<Issue>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at, parent_id
+                    sprint_id, created_at, updated_at, completed_at, parent_id, rank
              FROM issues
              WHERE deleted_at IS NULL
-             ORDER BY (sprint_id IS NULL), parent_id IS NOT NULL, id",
+             ORDER BY (sprint_id IS NULL),
+                      parent_id IS NOT NULL,
+                      updated_at DESC,
+                      id DESC",
         )?;
         let issues = stmt
             .query_map([], |row| {
@@ -94,6 +135,7 @@ impl Db {
                     updated_at: parse_dt(&row.get::<_, String>(9)?),
                     completed_at: completed_str.as_deref().map(parse_dt),
                     parent_id: row.get(11)?,
+                    rank: row.get(12)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -103,7 +145,7 @@ impl Db {
     pub fn get_issue(&self, id: i64) -> Result<Issue> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at, parent_id
+                    sprint_id, created_at, updated_at, completed_at, parent_id, rank
              FROM issues WHERE id = ?1",
         )?;
         let issue = stmt.query_row(params![id], |row| {
@@ -125,6 +167,7 @@ impl Db {
                 updated_at: parse_dt(&row.get::<_, String>(9)?),
                 completed_at: completed_str.as_deref().map(parse_dt),
                 parent_id: row.get(11)?,
+                rank: row.get(12)?,
             })
         })?;
         Ok(issue)
@@ -160,14 +203,18 @@ impl Db {
         completed_at: Option<&str>,
     ) -> Result<i64> {
         let due_str = due_date.map(|d| d.format("%Y-%m-%d").to_string());
+        // Assign rank = max(rank) + 1 so new issues go to the bottom
+        let next_rank: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(rank), 0) + 1 FROM issues", [], |r| r.get(0)
+        ).unwrap_or(1);
         self.conn.execute(
             "INSERT INTO issues
              (title, story_points, epic, status, due_date, description, parent_id,
-              created_at, updated_at, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              created_at, updated_at, completed_at, rank)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 title, story_points, epic, status.to_db(), due_str, description,
-                parent_id, created_at, updated_at, completed_at
+                parent_id, created_at, updated_at, completed_at, next_rank
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -247,7 +294,7 @@ impl Db {
     pub fn get_trash(&self) -> Result<Vec<Issue>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at, parent_id
+                    sprint_id, created_at, updated_at, completed_at, parent_id, rank
              FROM issues
              WHERE deleted_at IS NOT NULL AND parent_id IS NULL
              ORDER BY deleted_at DESC",
@@ -272,6 +319,7 @@ impl Db {
                     updated_at: parse_dt(&row.get::<_, String>(9)?),
                     completed_at: completed_str.as_deref().map(parse_dt),
                     parent_id: row.get(11)?,
+                    rank: row.get(12)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -359,12 +407,55 @@ impl Db {
         Ok(())
     }
 
+    /// Restore an issue row to an exact prior snapshot (used by undo).
+    /// Restores all mutable fields: title, story_points, epic, status, due_date,
+    /// description, sprint_id, updated_at, completed_at, parent_id, rank, deleted_at.
+    pub fn restore_issue_to_snapshot(&self, snap: &Issue) -> Result<()> {
+        let due_str = snap.due_date.map(|d| d.format("%Y-%m-%d").to_string());
+        let updated_str = snap.updated_at.format("%Y-%m-%d %H:%M:%S").to_string();
+        let completed_str = snap.completed_at.map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string());
+        self.conn.execute(
+            "UPDATE issues
+             SET title=?1, story_points=?2, epic=?3, status=?4, due_date=?5,
+                 description=?6, sprint_id=?7, updated_at=?8, completed_at=?9,
+                 parent_id=?10, rank=?11, deleted_at=NULL
+             WHERE id=?12",
+            params![
+                snap.title, snap.story_points, snap.epic, snap.status.to_db(),
+                due_str, snap.description, snap.sprint_id,
+                updated_str, completed_str,
+                snap.parent_id, snap.rank,
+                snap.id,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Override completed_at directly – used by seed data to backdate completions.
     pub fn set_completed_at(&self, id: i64, ts: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE issues SET completed_at=?1, updated_at=?1 WHERE id=?2",
             params![ts, id],
         )?;
+        Ok(())
+    }
+
+    /// Swap the rank values of two issues (used for reordering in the backlog).
+    /// Also equalises their updated_at so they sort adjacently in the updated_at DESC order.
+    pub fn swap_rank(&self, id_a: i64, id_b: i64) -> Result<()> {
+        let rank_a: i64 = self.conn.query_row(
+            "SELECT rank FROM issues WHERE id = ?1", params![id_a], |r| r.get(0))?;
+        let rank_b: i64 = self.conn.query_row(
+            "SELECT rank FROM issues WHERE id = ?1", params![id_b], |r| r.get(0))?;
+        // Use the same timestamp for both so they share an updated_at bucket,
+        // letting the rank tiebreaker determine their relative order.
+        let now = now_str();
+        self.conn.execute(
+            "UPDATE issues SET rank = ?1, updated_at = ?2 WHERE id = ?3",
+            params![rank_b, now, id_a])?;
+        self.conn.execute(
+            "UPDATE issues SET rank = ?1, updated_at = ?2 WHERE id = ?3",
+            params![rank_a, now, id_b])?;
         Ok(())
     }
 
@@ -400,6 +491,59 @@ impl Db {
     }
 
     // ── Sprints ───────────────────────────────────────────────────────────────
+
+    /// Return all sprints ordered newest first (by id desc).
+    pub fn get_all_sprints(&self) -> Result<Vec<Sprint>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, start_date, end_date, is_active, created_at
+             FROM sprints ORDER BY id DESC",
+        )?;
+        let sprints = stmt.query_map([], |row| {
+            Ok(Sprint {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                start_date: NaiveDate::parse_from_str(&row.get::<_, String>(2)?, "%Y-%m-%d")
+                    .unwrap_or_else(|_| Local::now().date_naive()),
+                end_date: NaiveDate::parse_from_str(&row.get::<_, String>(3)?, "%Y-%m-%d")
+                    .unwrap_or_else(|_| Local::now().date_naive()),
+                is_active: row.get::<_, i32>(4)? != 0,
+                created_at: parse_dt(&row.get::<_, String>(5)?),
+            })
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(sprints)
+    }
+
+    /// Return all issues that were ever in a given sprint (including deleted), ordered by rank.
+    pub fn get_sprint_issues(&self, sprint_id: i64) -> Result<Vec<Issue>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, story_points, epic, status, due_date, description,
+                    sprint_id, created_at, updated_at, completed_at, parent_id, rank
+             FROM issues
+             WHERE sprint_id = ?1 AND parent_id IS NULL
+             ORDER BY rank, id",
+        )?;
+        let issues = stmt.query_map(params![sprint_id], |row| {
+            let status_str: String = row.get(4)?;
+            let due_str: Option<String> = row.get(5)?;
+            let completed_str: Option<String> = row.get(10)?;
+            Ok(Issue {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                story_points: row.get(2)?,
+                epic: row.get(3)?,
+                status: Status::from_db(&status_str),
+                due_date: due_str.as_deref().and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()),
+                description: row.get(6)?,
+                sprint_id: row.get(7)?,
+                created_at: parse_dt(&row.get::<_, String>(8)?),
+                updated_at: parse_dt(&row.get::<_, String>(9)?),
+                completed_at: completed_str.as_deref().map(parse_dt),
+                parent_id: row.get(11)?,
+                rank: row.get(12)?,
+            })
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(issues)
+    }
 
     pub fn get_active_sprint(&self) -> Result<Option<Sprint>> {
         let mut stmt = self.conn.prepare(

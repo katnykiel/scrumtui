@@ -92,6 +92,9 @@ pub struct Issue {
     pub updated_at: NaiveDateTime,
     pub completed_at: Option<NaiveDateTime>,
     pub parent_id: Option<i64>,
+    /// Display rank within the backlog/sprint (lower = higher priority).
+    #[allow(dead_code)]
+    pub rank: i64,
 }
 
 /// Display story points without unnecessary trailing zeros.
