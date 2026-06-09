@@ -47,8 +47,18 @@ pub fn render(f: &mut Frame, app: &mut App) {
         );
     }
 
-    // Overlay popup if one is active. Clone to avoid double-borrow of app.
-    if let Some(p) = app.popup.clone() {
-        popup::render(f, &p, app);
+    // Overlay popup if one is active.
+    // Take the popup out of app temporarily so we can borrow both without cloning.
+    if let Some(p) = app.popup.take() {
+        match &p {
+            crate::app::Popup::GanttEpicDetail { .. } => {
+                gantt::render_epic_detail_popup(f, &p);
+            }
+            _ => popup::render(f, &p, app),
+        }
+        // Restore the popup (only if the key handler hasn't cleared it in the meantime —
+        // but render is called before key handling, so it will always be None at this point
+        // unless render itself clears it, which it doesn't).
+        app.popup = Some(p);
     }
 }

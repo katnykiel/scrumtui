@@ -1,12 +1,12 @@
 # scrumtui
 
-A minimal, local, terminal-based scrum board driven by keyboard shortcuts.
+A minimal, local, terminal-based scrum system driven by keyboard shortcuts. I use scrum every day to manage my research, and got sick of the existing scrum systems, so I vibe-coded this TUI to fit my needs. Maybe you'll find it useful too!
 
 ---
 
 > **⚠ AI-GENERATED CODE DISCLAIMER**
 >
-> The majority of this codebase was generated with the assistance of Claude Sonnet. It has been reviewed and lightly edited by a human, but has not been rigorously audited. Use at your own risk, and inspect any code before relying on it in a critical context.
+> The majority of this codebase was generated with the assistance of OpenCode and Claude Sonnet 4.6. It has been reviewed and lightly edited by a human, but has not been rigorously audited. Use at your own risk, and inspect any code before relying on it in a critical context.
 
 ---
 

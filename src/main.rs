@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
+    event::{self, Event, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -38,7 +38,10 @@ fn main() -> Result<()> {
             let db = Db::open(&db_path)?;
             println!("Importing from {csv_path} → {db_path}");
             let report = import::import_jira_csv(&db, csv_path)?;
-            println!("Done.  {} issues imported,  {} rows skipped.", report.imported, report.skipped);
+            println!(
+                "Done.  {} issues imported,  {} subtasks imported,  {} rows skipped.",
+                report.imported, report.subtasks_imported, report.skipped
+            );
             return Ok(());
         }
         Some("export") => {
@@ -210,7 +213,7 @@ fn main() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -218,11 +221,7 @@ fn main() -> Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     if let Err(err) = res {
@@ -269,18 +268,36 @@ fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
 ) -> Result<()> {
-    loop {
-        terminal.draw(|f| ui::render(f, app))?;
+    // Draw once on startup
+    terminal.draw(|f| ui::render(f, app))?;
 
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+    loop {
+        // If a status message is active, poll with a short timeout so it can
+        // expire and be cleared from the screen.  Otherwise block indefinitely
+        // — no CPU consumed while the user is idle.
+        let timeout = if app.current_status().is_some() {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_secs(3600) // effectively infinite
+        };
+
+        let had_event = event::poll(timeout)?;
+
+        if had_event {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if app.handle_key(key) {
                         break;
                     }
                 }
+                Event::Resize(_, _) => {
+                    // Terminal was resized — redraw unconditionally below
+                }
+                _ => continue, // mouse / focus events: ignore, don't redraw
             }
         }
+        // Redraw after every key press, resize, or status-message timeout tick
+        terminal.draw(|f| ui::render(f, app))?;
     }
     Ok(())
 }

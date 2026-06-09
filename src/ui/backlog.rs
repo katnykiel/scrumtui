@@ -10,16 +10,11 @@ use crate::app::{App, BacklogItem};
 use crate::models::{format_sp, Status};
 
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
-    // Search bar is 1 row tall and shown whenever search is active or a query exists
     let show_search = app.search_active || !app.search_query.is_empty();
     let constraints = if show_search {
-        vec![
-            Constraint::Length(1),
-            Constraint::Min(5),
-            Constraint::Length(8),
-        ]
+        vec![Constraint::Length(1), Constraint::Min(5), Constraint::Length(5)]
     } else {
-        vec![Constraint::Min(5), Constraint::Length(8)]
+        vec![Constraint::Min(5), Constraint::Length(5)]
     };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -38,8 +33,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_search_bar(f: &mut Frame, app: &App, area: Rect) {
     let cursor = if app.search_active { "▌" } else { "" };
-    let label = if app.search_active { " 🔍 " } else { " 🔍 " };
-    let content = format!("{label}{}{cursor}", app.search_query);
+    let content = format!("  / {}{}", app.search_query, cursor);
     let style = if app.search_active {
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
     } else {
@@ -90,46 +84,67 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
                 );
                 ListItem::new(Line::from(Span::styled(
                     label,
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
                 )))
             }
             BacklogItem::SprintFooter => {
-                // Draw a footer line that fills the available list width minus the 2-char
-                // border so it never overflows or looks truncated at any terminal width.
                 let inner_w = area.width.saturating_sub(2) as usize;
-                let dashes = "─".repeat(inner_w.saturating_sub(3)); // "  └" = 3 chars
+                let dashes = "─".repeat(inner_w.saturating_sub(3));
                 ListItem::new(Line::from(Span::styled(
                     format!("  └{dashes}"),
                     Style::default().fg(Color::Magenta),
                 )))
             }
-            BacklogItem::BacklogHeader => ListItem::new(Line::from(Span::styled(
-                "  ── BACKLOG ──────────────────────────────────────────────────",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            ))),
+            BacklogItem::BacklogHeader => {
+                let inner_w = area.width.saturating_sub(2) as usize;
+                let dashes = "─".repeat(inner_w.saturating_sub(14));
+                ListItem::new(Line::from(Span::styled(
+                    format!("  ── backlog {dashes}"),
+                    Style::default().fg(Color::DarkGray),
+                )))
+            }
             BacklogItem::Issue(issue, in_sprint) => {
                 let sym = status_symbol(&issue.status);
                 let sc = status_color(&issue.status);
                 let indent = if *in_sprint { "  │  " } else { "     " };
-                let due = issue
-                    .due_date
+                let due = issue.due_date
                     .map(|d| format!("  {}", d.format("%b %d")))
                     .unwrap_or_default();
+                let due_color = issue.due_date.map(|d| {
+                    if issue.status == Status::Done {
+                        Color::DarkGray
+                    } else {
+                        let days = (d - chrono::Local::now().date_naive()).num_days();
+                        if days < 0 { Color::Red } else if days < 7 { Color::Yellow } else { Color::DarkGray }
+                    }
+                }).unwrap_or(Color::DarkGray);
                 let pointer = if idx == selected { "▶" } else { " " };
+                // Done issues are dimmed; active issues are full brightness
+                let title_style = if issue.status == Status::Done {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default()
+                };
+                let epic_style = if issue.status == Status::Done {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Cyan)
+                };
+                let sp_style = if issue.status == Status::Done {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Magenta)
+                };
 
                 ListItem::new(Line::from(vec![
                     Span::styled(pointer, Style::default().fg(Color::Magenta)),
                     Span::styled(indent, Style::default().fg(Color::Magenta)),
                     Span::styled(format!("{sym} "), Style::default().fg(sc)),
-                    Span::styled(format!("{:<42}", trunc(&issue.title, 42)), Style::default()),
-                    Span::styled(format!(" {:>4}sp", format_sp(issue.story_points)), Style::default().fg(Color::Magenta)),
+                    Span::styled(format!("{:<42}", trunc(&issue.title, 42)), title_style),
+                    Span::styled(format!(" {:>4}sp", format_sp(issue.story_points)), sp_style),
                     Span::styled(format!("  {:<4}", issue.status.short()), Style::default().fg(sc)),
-                    Span::styled(format!("  {:<14}", trunc(&issue.epic, 14)), Style::default().fg(Color::Cyan)),
-                    Span::styled(due, Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("  {:<14}", trunc(&issue.epic, 14)), epic_style),
+                    Span::styled(due, Style::default().fg(due_color)),
                 ]))
             }
             BacklogItem::Subtask(sub, in_sprint) => {
@@ -137,6 +152,7 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
                 let sc = status_color(&sub.status);
                 let indent = if *in_sprint { "  │     └ " } else { "        └ " };
                 let pointer = if idx == selected { "▶" } else { " " };
+                // Done subtasks dimmed, others normal gray
                 let title_style = if sub.status == Status::Done {
                     Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
                 } else {
@@ -147,14 +163,8 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled(pointer, Style::default().fg(Color::Magenta)),
                     Span::styled(indent, Style::default().fg(Color::DarkGray)),
                     Span::styled(format!("{sym} "), Style::default().fg(sc)),
-                    Span::styled(
-                        format!("{:<42}", trunc(&sub.title, 42)),
-                        title_style,
-                    ),
-                    Span::styled(
-                        format!("  {:<4}", sub.status.short()),
-                        Style::default().fg(sc),
-                    ),
+                    Span::styled(format!("{:<42}", trunc(&sub.title, 42)), title_style),
+                    Span::styled(format!("  {:<4}", sub.status.short()), Style::default().fg(sc)),
                 ]))
             }
         })
@@ -168,14 +178,11 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
                 .border_type(BorderType::Rounded)
                 .title(Line::from(vec![
                     Span::raw(" "),
-                    Span::styled(
-                        "scrumtui",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled("scrumtui", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                     Span::raw(" "),
                 ]))
                 .title_bottom(Line::from(Span::styled(
-                    " [n]ew  [e]edit  [d]trash  [T]trash view  []/[]status  [s]print  [S]mgr  [/]search  [c]done  [g/G]top/bot  [u]undo  [?]help ",
+                    " [n]ew  [e]dit  [d]elete  []/[]status  [s]print  [S]mgr  [/]search  [c]done  [^j/^k]rank  [u]ndo  [?]help ",
                     Style::default().fg(Color::DarkGray),
                 )))
                 .border_style(Style::default().fg(Color::Rgb(80, 80, 120))),
@@ -192,8 +199,7 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(Color::Rgb(60, 60, 90)))
         .title(Span::styled(" detail ", Style::default().fg(Color::DarkGray)));
 
-    let issue = app.selected_issue();
-    if issue.is_none() {
+    let Some(issue) = app.selected_issue() else {
         f.render_widget(
             Paragraph::new("  No issue selected.")
                 .style(Style::default().fg(Color::DarkGray))
@@ -201,63 +207,51 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
             area,
         );
         return;
-    }
-    let issue = issue.unwrap();
+    };
 
     let sc = status_color(&issue.status);
     let sym = status_symbol(&issue.status);
-    let desc = issue.description.as_deref().unwrap_or("No description.");
-    let due_str = issue
-        .due_date
+    let desc = issue.description.as_deref().unwrap_or("");
+    let due_str = issue.due_date
         .map(|d| d.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "—".into());
     let created = issue.created_at.format("%Y-%m-%d %H:%M").to_string();
     let updated = issue.updated_at.format("%Y-%m-%d %H:%M").to_string();
-    let completed = issue
-        .completed_at
+    let completed = issue.completed_at
         .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "—".into());
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(format!("  {sym} "), Style::default().fg(sc)),
             Span::styled(
                 issue.title.clone(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(
-                    "   #{} · {}sp · {} · {}",
-                    issue.id,
-                    format_sp(issue.story_points),
-                    issue.status.label(),
-                    issue.epic
-                ),
+                format!("   #{} · {}sp · {} · {}", issue.id, format_sp(issue.story_points), issue.status.label(), issue.epic),
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
-        Line::from(vec![
+    ];
+    if !desc.is_empty() {
+        lines.push(Line::from(vec![
             Span::styled("         ", Style::default()),
             Span::styled(desc, Style::default().fg(Color::Gray)),
-        ]),
-        Line::from(vec![
-            Span::styled("  due ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:<12}", due_str), Style::default().fg(Color::Yellow)),
-            Span::styled("  created ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:<17}", created), Style::default().fg(Color::Gray)),
-            Span::styled("  updated ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:<17}", updated), Style::default().fg(Color::Gray)),
-            Span::styled("  done ", Style::default().fg(Color::DarkGray)),
-            Span::styled(completed, Style::default().fg(Color::Gray)),
-        ]),
-    ];
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("  due ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{:<12}", due_str), Style::default().fg(Color::Yellow)),
+        Span::styled("  created ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{:<17}", created), Style::default().fg(Color::Gray)),
+        Span::styled("  updated ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{:<17}", updated), Style::default().fg(Color::Gray)),
+        Span::styled("  done ", Style::default().fg(Color::DarkGray)),
+        Span::styled(completed, Style::default().fg(Color::Gray)),
+    ]));
 
-    f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(block),
-        area,
-    );
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
 }
 
 pub fn trunc(s: &str, max: usize) -> String {

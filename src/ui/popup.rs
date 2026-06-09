@@ -1,4 +1,4 @@
-use chrono::{Duration, Local};
+use chrono::{Local, NaiveDateTime};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -30,6 +30,7 @@ pub fn render(f: &mut Frame, popup: &Popup, app: &App) {
         Popup::ConfirmDelete(_, title) => render_confirm_delete(f, title),
         Popup::Trash { items, sel } => render_trash(f, items, *sel),
         Popup::Help => render_help(f),
+        Popup::GanttEpicDetail { .. } => {} // handled separately in mod.rs
     }
 }
 
@@ -50,8 +51,8 @@ fn centered_rect(width: u16, height: u16, r: Rect) -> Rect {
 
 const FIELD_LABELS: [&str; 6] = [
     "Title",
-    "Story Points",
     "Epic",
+    "Story Points",
     "Status",
     "Due Date (YYYY-MM-DD)",
     "Description",
@@ -112,8 +113,8 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
     let desc_display = form.description.replace('\n', "  ·  ");
     let values: [String; 6] = [
         form.title.clone(),
-        form.story_points.clone(),
         form.epic.clone(),
+        form.story_points.clone(),
         Status::from_index(form.status_idx).label().to_string(),
         form.due_date.clone(),
         desc_display,
@@ -206,7 +207,7 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
 
     // ── Epic autocomplete dropdown ─────────────────────────────────────────────
     if form.epic_dropdown_open {
-        render_epic_dropdown(f, form, app, field_areas[2]);
+        render_epic_dropdown(f, form, app, field_areas[1]);
     }
 
     // ── Due-date autocomplete dropdown ─────────────────────────────────────────
@@ -355,9 +356,9 @@ fn render_trash(f: &mut Frame, items: &[crate::models::Issue], sel: usize) {
 
 fn render_epic_dropdown(f: &mut Frame, form: &IssueForm, app: &App, epic_field_area: Rect) {
     let q = form.epic.to_lowercase();
-    let matches: Vec<String> = app
+    let matches: Vec<&String> = app
         .epics()
-        .into_iter()
+        .iter()
         .filter(|e| e.to_lowercase().contains(&q))
         .collect();
 
@@ -366,7 +367,7 @@ fn render_epic_dropdown(f: &mut Frame, form: &IssueForm, app: &App, epic_field_a
     }
 
     let max_items = 6usize;
-    let visible: Vec<&String> = matches.iter().take(max_items).collect();
+    let visible: Vec<&&String> = matches.iter().take(max_items).collect();
     let height = visible.len() as u16 + 2; // +2 for border
     let width = (visible.iter().map(|e| e.len()).max().unwrap_or(10) + 4)
         .max(20)
@@ -642,13 +643,19 @@ fn render_sprint_form(f: &mut Frame, form: &SprintForm, app: &App) {
     );
 }
 
-/// Compute burnup data from a sprint's date range and its issues.
-/// Returns (ideal_line, actual_line, total_sp, sprint_days).
+/// Compute burndown chart data from a sprint's date range and its issues.
+///
+/// Returns (scope_line, ideal_line, actual_line, total_sp, sprint_days) where:
+/// - scope_line: flat horizontal line at total_sp (shows total scope)
+/// - ideal_line: diagonal from (0, total_sp) to (sprint_days, 0) — ideal burndown rate
+/// - actual_line: remaining SP step function — decreases when issues are completed
+///
+/// X axis is fractional days from sprint start (so completion timestamps are exact, not rounded to day).
 pub fn compute_burnup_for(
     start: chrono::NaiveDate,
     end: chrono::NaiveDate,
     issues: &[&Issue],
-) -> Option<(Vec<(f64, f64)>, Vec<(f64, f64)>, f64, f64)> {
+) -> Option<(Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>, f64, f64)> {
     if end <= start {
         return None;
     }
@@ -659,36 +666,70 @@ pub fn compute_burnup_for(
     }
 
     let sprint_days = (end - start).num_days() as f64;
+    let start_dt: NaiveDateTime = start.and_hms_opt(0, 0, 0).unwrap();
 
-    // Ideal burnup: straight line from (0,0) to (sprint_days, total_sp)
-    let ideal: Vec<(f64, f64)> = vec![(0.0, 0.0), (sprint_days, total_sp)];
+    // Scope line: flat at total_sp across whole sprint
+    let scope: Vec<(f64, f64)> = vec![(0.0, total_sp), (sprint_days, total_sp)];
 
-    // Actual burnup: step function of cumulative completed story points per day.
-    // For completed sprints we walk all the way to end_date so the full curve shows.
-    let today = Local::now().date_naive();
-    let walk_to = today.min(end);
-    let max_day = (walk_to - start).num_days().max(0);
+    // Ideal burndown: straight line from (0, total_sp) to (sprint_days, 0)
+    let ideal: Vec<(f64, f64)> = vec![(0.0, total_sp), (sprint_days, 0.0)];
 
-    let mut actual: Vec<(f64, f64)> = vec![(0.0, 0.0)];
-    for d in 1..=max_day {
-        let day_date = start + Duration::days(d);
-        let cum_sp: f64 = issues
-            .iter()
-            .filter(|i| {
-                i.status == Status::Done
-                    && i.completed_at
-                        .map(|c| c.date() <= day_date)
-                        .unwrap_or(false)
-            })
-            .map(|i| i.story_points)
-            .sum();
-        actual.push((d as f64, cum_sp));
+    // Actual burndown: step function of remaining story points.
+    // Collect all completion events sorted by exact timestamp (fractional days).
+    let now = Local::now().naive_local();
+    let sprint_end_dt: NaiveDateTime = end.and_hms_opt(23, 59, 59).unwrap();
+    let cutoff = now.min(sprint_end_dt);
+
+    // Gather completion events within sprint window
+    let mut events: Vec<(f64, f64)> = issues
+        .iter()
+        .filter_map(|i| {
+            if i.status == Status::Done {
+                i.completed_at.and_then(|c| {
+                    if c <= cutoff {
+                        let frac_days = (c - start_dt).num_seconds() as f64 / 86400.0;
+                        // Only count completions within the sprint window (0..=sprint_days)
+                        if frac_days >= 0.0 {
+                            Some((frac_days.min(sprint_days), i.story_points))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort by time
+    events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Build step function: start at total_sp, subtract SP at each completion moment
+    let mut actual: Vec<(f64, f64)> = Vec::new();
+    let mut remaining = total_sp;
+    actual.push((0.0, remaining));
+    for (x, sp) in &events {
+        // Add a point just before the step (keeps the horizontal segment)
+        actual.push((*x, remaining));
+        remaining -= sp;
+        actual.push((*x, remaining));
+    }
+    // Extend to current time (or end of sprint)
+    let current_x = {
+        let cx = (now - start_dt).num_seconds() as f64 / 86400.0;
+        cx.clamp(0.0, sprint_days)
+    };
+    if actual.last().map(|(x, _)| *x).unwrap_or(0.0) < current_x {
+        actual.push((current_x, remaining));
     }
 
-    Some((ideal, actual, total_sp, sprint_days))
+    Some((scope, ideal, actual, total_sp, sprint_days))
 }
 
-/// Render a burnup chart for any sprint given its dates and issues.
+/// Render a burndown chart for any sprint given its dates and issues.
 /// Used by both the sprint manager popup and the history view.
 pub fn render_burnup_chart(
     f: &mut Frame,
@@ -701,7 +742,7 @@ pub fn render_burnup_chart(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .title(Span::styled(
-            " burnup ",
+            " burndown ",
             Style::default().fg(Color::DarkGray),
         ))
         .border_style(Style::default().fg(Color::Rgb(80, 60, 100)));
@@ -720,13 +761,13 @@ pub fn render_burnup_chart(
                 area,
             );
         }
-        Some((ideal, actual, total_sp, sprint_days)) => {
+        Some((scope, ideal, actual, total_sp, sprint_days)) => {
             let y_max = total_sp * 1.1;
-            let x_max = sprint_days + 0.5;
+            let x_max = sprint_days;
 
             let mid_day = (sprint_days / 2.0).round() as i64;
             let x_labels = vec![
-                Span::styled("0", Style::default().fg(Color::DarkGray)),
+                Span::styled("d0", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("d{mid_day}"),
                     Style::default().fg(Color::DarkGray),
@@ -737,23 +778,29 @@ pub fn render_burnup_chart(
                 ),
             ];
             let y_labels = vec![
-                Span::styled("0", Style::default().fg(Color::DarkGray)),
+                Span::styled("0", Style::default().fg(Color::Green)),
                 Span::styled(
-                    format!("{}", format_sp(total_sp / 2.0)),
+                    format_sp(total_sp / 2.0),
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(
                     format_sp(total_sp),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Yellow),
                 ),
             ];
 
             let datasets = vec![
                 Dataset::default()
+                    .name("scope")
+                    .marker(symbols::Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(Color::Yellow))
+                    .data(&scope),
+                Dataset::default()
                     .name("ideal")
                     .marker(symbols::Marker::Braille)
                     .graph_type(GraphType::Line)
-                    .style(Style::default().fg(Color::DarkGray))
+                    .style(Style::default().fg(Color::Rgb(120, 120, 120)))
                     .data(&ideal),
                 Dataset::default()
                     .name("actual")
@@ -831,7 +878,7 @@ fn render_confirm_delete(f: &mut Frame, title: &str) {
 // ── Help ───────────────────────────────────────────────────────────────────────
 
 fn render_help(f: &mut Frame) {
-    let area = centered_rect(66, 58, f.area());
+    let area = centered_rect(66, 52, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -882,60 +929,58 @@ fn render_help(f: &mut Frame) {
         hdr("GLOBAL"),
         key("1 / 2 / 3 / 4", "Backlog / Kanban / Gantt / Sprint history"),
         key("q  Ctrl-C", "Quit"),
-        key("?", "Toggle this help"),
-        key("u  Ctrl-Z", "Undo last action (up to 50 steps)"),
+        key("?", "Toggle help"),
+        key("u  Ctrl-Z", "Undo (up to 50 steps)"),
         sep(),
         hdr("BACKLOG  (view 1)"),
-        key("j / k  ↑ / ↓", "Navigate issues"),
+        key("j / k", "Navigate issues"),
         key("g / G", "Jump to first / last issue"),
         key("Ctrl-D / Ctrl-U", "Jump down / up 10 items"),
-        key("R / r", "Move selected issue up / down in rank"),
-        key("/", "Search / filter issues"),
-        key("c", "Toggle show / hide completed issues"),
+        key("Ctrl-j / Ctrl-k", "Move issue down / up in rank"),
+        key("/", "Search / filter"),
+        key("c", "Toggle show completed"),
         key("] / [", "Advance / regress status"),
         key("n", "New issue"),
         key("e  Enter", "Edit selected issue"),
-        key("d", "Move to trash (confirm with d)"),
+        key("d", "Move to trash"),
         key("T", "Open trash (restore / purge)"),
         key("s", "Toggle sprint membership"),
         key("S", "Open sprint manager"),
         sep(),
         hdr("KANBAN  (view 2)"),
-        key("h / l  ← / →", "Switch column"),
-        key("j / k  ↑ / ↓", "Navigate within column"),
-        key("] / [", "Advance / regress status"),
+        key("h / l", "Switch column"),
+        key("j / k", "Navigate within column"),
+        key("Tab", "Switch between parent / subtask panel"),
+        key("] / [", "Advance / regress status (follows issue)"),
         key("e  Enter", "Edit selected issue"),
         sep(),
         hdr("GANTT  (view 3)"),
-        key("j / k  ↑ / ↓", "Scroll down / up"),
+        key("j / k", "Navigate epics"),
+        key("Enter / e", "Open epic detail (issues + counts)"),
         sep(),
         hdr("SPRINT HISTORY  (view 4)"),
-        key("j / k  ↑ / ↓", "Select sprint"),
+        key("j / k", "Select sprint"),
+        key("e  Enter", "Rename / edit sprint"),
         sep(),
-        hdr("FORMS"),
+        hdr("ISSUE FORM"),
         key("Tab / Shift-Tab", "Next / previous field"),
-        key("h / l  in Status field", "Cycle status value"),
-        key("Space  in Active field", "Toggle yes / no"),
-        key("Enter", "Save"),
-        key("Esc", "Cancel / close dropdown"),
+        key("h / l  in Status", "Cycle status"),
+        key("Space  in Active", "Toggle yes / no"),
+        key("Enter", "Save  |  Esc  Cancel"),
         sep(),
         hdr("SUBTASKS  (in issue form)"),
-        key("j / k", "Navigate subtasks"),
-        key("e / i", "Edit selected subtask title"),
-        key("] / [", "Advance / regress subtask status"),
-        key("x", "Remove subtask (applied on save)"),
+        key("Tab", "Focus subtask list"),
+        key("j / k", "Navigate"),
+        key("e / i", "Edit title"),
+        key("] / [", "Advance / regress status"),
+        key("x", "Remove (on save)"),
         key("Ctrl-N", "Add new subtask"),
-        key("Esc", "Return focus to form fields"),
+        key("Esc", "Back to form fields"),
         sep(),
-        hdr("TRASH  (T key)"),
-        key("j / k  ↑ / ↓", "Navigate"),
-        key("r", "Restore selected issue"),
-        key("D", "Permanently delete (cannot undo)"),
+        hdr("TRASH"),
+        key("j / k", "Navigate"),
+        key("r", "Restore  |  D  Delete permanently"),
         key("Esc", "Close"),
-        sep(),
-        hdr("DELETE CONFIRM"),
-        key("d", "Confirm move to trash"),
-        key("n / Esc", "Cancel"),
     ];
 
     f.render_widget(Paragraph::new(lines), inner);

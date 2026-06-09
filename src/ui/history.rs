@@ -80,7 +80,7 @@ fn render_sprint_list(f: &mut Frame, app: &App, area: Rect) {
                     Span::raw(" "),
                 ]))
                 .title_bottom(Line::from(Span::styled(
-                    " [j/k] navigate ",
+                    " [j/k] navigate  [e] rename ",
                     Style::default().fg(Color::DarkGray),
                 )))
                 .border_style(Style::default().fg(Color::Rgb(80, 80, 120))),
@@ -143,10 +143,10 @@ fn render_sprint_detail(f: &mut Frame, app: &App, area: Rect) {
 
     let issues = &app.history_issues;
 
-    // ── Left: stats header + issue list ───────────────────────────────────────
+    // ── Left: stats header (6 rows) + issue list (fill) ───────────────────────
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(1)])
+        .constraints([Constraint::Length(6), Constraint::Min(1)])
         .split(h_chunks[0]);
 
     render_stats_header(f, app, left_chunks[0], sprint, issues);
@@ -180,6 +180,7 @@ fn render_stats_header(
     };
 
     let header_lines = vec![
+        Line::from(""),
         Line::from(vec![
             Span::styled(
                 format!("  {} ", sprint.name),
@@ -282,45 +283,31 @@ fn render_issue_list(f: &mut Frame, issues: &[crate::models::Issue], area: Rect)
         .map(|line: Line| ListItem::new(line))
         .collect();
 
-    let empty_msg = if issues.is_empty() {
-        "  No issues in this sprint."
-    } else {
-        ""
-    };
+    let hint = " [1]backlog  [2]kanban  [3]gantt  [4]history  [?]help ";
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Line::from(Span::styled(
+            " issues ",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .title_bottom(Line::from(Span::styled(
+            hint,
+            Style::default().fg(Color::DarkGray),
+        )))
+        .border_style(Style::default().fg(Color::Rgb(60, 60, 90)));
 
     if issues.is_empty() {
         f.render_widget(
-            Paragraph::new(empty_msg)
-                .style(Style::default().fg(Color::DarkGray))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .title(Line::from(Span::styled(
-                            " issues ",
-                            Style::default().fg(Color::DarkGray),
-                        )))
-                        .border_style(Style::default().fg(Color::Rgb(60, 60, 90))),
-                ),
+            Paragraph::new(Line::from(Span::styled(
+                "  No issues in this sprint.",
+                Style::default().fg(Color::DarkGray),
+            )))
+            .block(block),
             area,
         );
     } else {
-        f.render_widget(
-            List::new(list_items).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .title(Line::from(Span::styled(
-                        " issues ",
-                        Style::default().fg(Color::DarkGray),
-                    )))
-                    .title_bottom(Line::from(Span::styled(
-                        " [1]backlog  [2]kanban  [3]gantt  [4]history  [?]help ",
-                        Style::default().fg(Color::DarkGray),
-                    )))
-                    .border_style(Style::default().fg(Color::Rgb(60, 60, 90))),
-            ),
-            area,
-        );
+        f.render_widget(List::new(list_items).block(block), area);
     }
 }

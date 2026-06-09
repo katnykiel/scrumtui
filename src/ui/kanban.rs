@@ -8,230 +8,211 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::models::{format_sp, Status};
+use crate::models::{format_sp, Issue, Status};
 use crate::ui::backlog::{status_color, status_symbol, trunc};
-
-/// Color for a due date relative to today.
-/// - Overdue → Red
-/// - Due within 7 days → Yellow
-/// - Otherwise → DarkGray
-fn due_date_color(due: &chrono::NaiveDate) -> Color {
-    let today = Local::now().date_naive();
-    let days = (*due - today).num_days();
-    if days < 0 {
-        Color::Red
-    } else if days < 7 {
-        Color::Yellow
-    } else {
-        Color::DarkGray
-    }
-}
 
 const STATUSES: [Status; 3] = [Status::Todo, Status::InProgress, Status::Done];
 
+fn due_color(due: &chrono::NaiveDate, done: bool) -> Color {
+    if done { return Color::DarkGray; }
+    let today = Local::now().date_naive();
+    let days = (*due - today).num_days();
+    if days < 0 { Color::Red } else if days < 7 { Color::Yellow } else { Color::DarkGray }
+}
+
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
-    // Outer titled box for visual consistency with other views
-    let outer_block = Block::default()
+    let has_subs = app.sprint_has_any_subtasks();
+
+    let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .title(Line::from(vec![
             Span::raw(" "),
-            Span::styled(
-                "kanban",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("kanban", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw(" "),
         ]))
         .title_bottom(Line::from(Span::styled(
-            " [j/k] nav  [h/l] col  []/[] status  [e] edit  [?]help ",
+            if has_subs {
+                " [h/l] col  [j/k] nav  [Tab] panel  []/[] status  [e] edit  [?]help "
+            } else {
+                " [h/l] col  [j/k] nav  []/[] status  [e] edit  [?]help "
+            },
             Style::default().fg(Color::DarkGray),
         )))
         .border_style(Style::default().fg(Color::Rgb(80, 80, 120)));
 
-    let inner = outer_block.inner(area);
-    f.render_widget(outer_block, area);
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
 
-    // Split inner vertically: top = kanban columns, bottom = detail pane (8 rows)
-    let chunks = Layout::default()
+    // Vertical split: kanban board on top, detail pane on bottom (4 rows)
+    let v_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(8)])
+        .constraints([Constraint::Min(6), Constraint::Length(4)])
         .split(inner);
 
-    let col_area = chunks[0];
-    let detail_area = chunks[1];
+    let board_area = v_chunks[0];
+    let detail_area = v_chunks[1];
 
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-        ])
-        .split(col_area);
+    if has_subs {
+        // Size subtask panel to fit its content, cap at half the board height
+        let sub_max: usize = (0..3)
+            .map(|c| app.sprint_subtasks_by_status(&Status::from_index(c)).len())
+            .max()
+            .unwrap_or(0);
+        let sub_h = ((sub_max + 3) as u16).max(4).min(board_area.height / 2);
+        let parent_h = board_area.height.saturating_sub(sub_h);
 
-    for (col_idx, status) in STATUSES.iter().enumerate() {
-        render_column(f, app, cols[col_idx], col_idx, status);
+        let panels = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(parent_h), Constraint::Length(sub_h)])
+            .split(board_area);
+
+        render_board(f, app, panels[0], false);
+        render_board(f, app, panels[1], true);
+    } else {
+        render_board(f, app, board_area, false);
     }
 
     render_detail(f, app, detail_area);
 }
 
-fn render_column(f: &mut Frame, app: &mut App, area: Rect, col_idx: usize, status: &Status) {
-    let issues = app.sprint_issues_by_status(status);
-    let is_active_col = app.kanban_col == col_idx;
-    let selected_row = app.kanban_rows[col_idx];
-    let sc = status_color(status);
-    let sym = status_symbol(status);
+fn render_board(f: &mut Frame, app: &mut App, area: Rect, is_sub_panel: bool) {
+    let panel_focused = if is_sub_panel { app.kanban_panel == 1 } else { app.kanban_panel == 0 };
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(2)])
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(1, 3), Constraint::Ratio(1, 3)])
         .split(area);
 
-    // Header
+    for (col_idx, status) in STATUSES.iter().enumerate() {
+        render_column(f, app, cols[col_idx], col_idx, status, is_sub_panel, panel_focused);
+    }
+}
+
+fn render_column(
+    f: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    col_idx: usize,
+    status: &Status,
+    is_sub_panel: bool,
+    panel_focused: bool,
+) {
+    let is_active_col = app.kanban_col == col_idx && panel_focused;
+    let sc = status_color(status);
+
+    let issues: Vec<Issue> = if is_sub_panel {
+        app.sprint_subtasks_by_status(status)
+    } else {
+        app.sprint_parents_by_status(status)
+    };
+
+    let selected_row = if is_sub_panel {
+        app.kanban_sub_rows[col_idx]
+    } else {
+        app.kanban_rows[col_idx]
+    };
+
+    // Active col in focused panel uses the status color; everything else is dim purple
+    let border_color = if is_active_col { sc } else { Color::Rgb(60, 60, 90) };
+
+    let col_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(area);
+
+    // ── Header ──────────────────────────────────────────────────────────────
+    let sym = status_symbol(status);
     let total_sp: f64 = issues.iter().map(|i| i.story_points).sum();
+    let sp_str = if total_sp > 0.0 { format!("  {}sp", format_sp(total_sp)) } else { String::new() };
+
+    let header_text = if is_sub_panel {
+        format!("  subtasks  {}{}", issues.len(), sp_str)
+    } else {
+        format!("  {sym} {}  {}  {}{}", status.label(), "·", issues.len(), sp_str)
+    };
     let header_style = if is_active_col {
         Style::default().fg(sc).add_modifier(Modifier::BOLD | Modifier::REVERSED)
     } else {
-        Style::default().fg(sc).add_modifier(Modifier::BOLD)
+        Style::default().fg(if is_sub_panel { Color::DarkGray } else { sc }).add_modifier(Modifier::BOLD)
     };
 
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(format!(" {sym} "), Style::default().fg(sc)),
-        Span::styled(status.label(), header_style),
-        Span::styled(
-            format!("  {} issues · {}sp ", issues.len(), format_sp(total_sp)),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(if is_active_col {
-                Style::default().fg(sc)
-            } else {
-                Style::default().fg(Color::Rgb(60, 60, 90))
-            }),
-        );
-    f.render_widget(header, chunks[0]);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(header_text, header_style)))
+            .block(Block::default()
+                .borders(Borders::LEFT | Borders::TOP | Borders::RIGHT)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(border_color))),
+        col_chunks[0],
+    );
 
-    // Issue list
-    let col_width = area.width as usize;
+    // ── Issue list ───────────────────────────────────────────────────────────
+    let col_w = area.width as usize;
     let items: Vec<ListItem> = issues
         .iter()
         .enumerate()
         .map(|(row, issue)| {
             let is_sel = is_active_col && row == selected_row;
             let pointer = if is_sel { "▶" } else { " " };
+            let title_w = col_w.saturating_sub(4);
+            let is_done = issue.status == Status::Done;
 
-            // Due date with urgency color (skip for Done issues — already completed)
-            let due_color = issue.due_date
-                .map(|d| if issue.status == Status::Done { Color::DarkGray } else { due_date_color(&d) })
-                .unwrap_or(Color::DarkGray);
-            let due_str = issue
-                .due_date
-                .map(|d| format!("  {}", d.format("%b %d")))
-                .unwrap_or_default();
-
-            if issue.is_subtask() {
-                // Subtask card: show parent label + title
-                let parent_label = issue.parent_id
-                    .and_then(|pid| app.issue_by_id(pid))
-                    .map(|p| trunc(&p.title, col_width.saturating_sub(6)))
-                    .unwrap_or_default();
-                let lines = vec![
-                    Line::from(vec![
-                        Span::styled(pointer, Style::default().fg(Color::Magenta)),
-                        Span::styled(
-                            format!(" {}", trunc(&issue.title, col_width.saturating_sub(3))),
-                            Style::default(),
-                        ),
-                    ]),
-                    Line::from(vec![
-                        Span::styled(
-                            format!("   ↳ {}", parent_label),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::styled(due_str, Style::default().fg(due_color)),
-                    ]),
-                ];
-                ListItem::new(lines)
-            } else {
-                // Regular issue card
-                let (done_subs, total_subs) = app.subtask_counts(issue.id);
-                let subtask_badge = if total_subs > 0 {
-                    format!("  [{}/{}]", done_subs, total_subs)
+            if is_sub_panel {
+                let title_style = if is_done {
+                    Style::default().fg(Color::DarkGray)
                 } else {
-                    String::new()
+                    Style::default().fg(Color::Gray)
                 };
-                let auto_status = if total_subs > 0 { "  ⊙" } else { "" };
-                let lines = vec![
+                let due_str = issue.due_date.map(|d| format!("  {}", d.format("%b %d"))).unwrap_or_default();
+                ListItem::new(Line::from(vec![
+                    Span::styled(pointer, Style::default().fg(Color::Magenta)),
+                    Span::styled(format!(" {} ", status_symbol(&issue.status)), Style::default().fg(status_color(&issue.status))),
+                    Span::styled(trunc(&issue.title, title_w.saturating_sub(3)), title_style),
+                    Span::styled(due_str, Style::default().fg(
+                        issue.due_date.map(|d| due_color(&d, is_done)).unwrap_or(Color::DarkGray)
+                    )),
+                ]))
+            } else {
+                let (done_subs, total_subs) = app.subtask_counts(issue.id);
+                let sub_badge = if total_subs > 0 { format!("  [{}/{}]", done_subs, total_subs) } else { String::new() };
+                let due_str = issue.due_date.map(|d| format!("  {}", d.format("%b %d"))).unwrap_or_default();
+                let title_style = if is_done {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(vec![
                     Line::from(vec![
                         Span::styled(pointer, Style::default().fg(Color::Magenta)),
-                        Span::styled(
-                            format!(" {}", trunc(&issue.title, col_width.saturating_sub(3))),
-                            Style::default(),
-                        ),
+                        Span::styled(format!(" {}", trunc(&issue.title, title_w)), title_style),
                     ]),
                     Line::from(vec![
                         Span::styled(
-                            format!("   #{} · {}sp  {}{}{}", issue.id, format_sp(issue.story_points), issue.epic, subtask_badge, auto_status),
+                            format!("   #{} · {}sp  {}{}", issue.id, format_sp(issue.story_points), trunc(&issue.epic, 14), sub_badge),
                             Style::default().fg(Color::DarkGray),
                         ),
-                        Span::styled(due_str, Style::default().fg(due_color)),
+                        Span::styled(due_str, Style::default().fg(
+                            issue.due_date.map(|d| due_color(&d, is_done)).unwrap_or(Color::DarkGray)
+                        )),
                     ]),
-                ];
-                ListItem::new(lines)
+                ])
             }
         })
         .collect();
 
     let mut list_state = ratatui::widgets::ListState::default();
     if is_active_col && !issues.is_empty() {
-        list_state.select(Some(selected_row));
+        list_state.select(Some(selected_row.min(issues.len().saturating_sub(1))));
     }
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                .border_type(BorderType::Rounded)
-                .border_style(if is_active_col {
-                    Style::default().fg(sc)
-                } else {
-                    Style::default().fg(Color::Rgb(60, 60, 90))
-                }),
-        )
+        .block(Block::default()
+            .borders(Borders::LEFT | Borders::BOTTOM | Borders::RIGHT)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(border_color)))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
 
-    f.render_stateful_widget(list, chunks[1], &mut list_state);
-
-    // Hint bar
-    let hint = if is_active_col {
-        Line::from(Span::styled(
-            " [j/k] nav  []/[] status  [e] edit  [h/l] col ",
-            Style::default().fg(Color::DarkGray),
-        ))
-    } else {
-        Line::from(Span::styled(
-            " [h/l] switch col ",
-            Style::default().fg(Color::DarkGray),
-        ))
-    };
-    f.render_widget(
-        Paragraph::new(hint).block(
-            Block::default()
-                .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-                .border_type(BorderType::Rounded)
-                .border_style(if is_active_col {
-                    Style::default().fg(sc)
-                } else {
-                    Style::default().fg(Color::Rgb(60, 60, 90))
-                }),
-        ),
-        chunks[2],
-    );
+    f.render_stateful_widget(list, col_chunks[1], &mut list_state);
 }
 
 fn render_detail(f: &mut Frame, app: &App, area: Rect) {
@@ -241,8 +222,7 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(Color::Rgb(60, 60, 90)))
         .title(Span::styled(" detail ", Style::default().fg(Color::DarkGray)));
 
-    let issue = app.selected_kanban_issue();
-    if issue.is_none() {
+    let Some(issue) = app.kanban_selected_issue() else {
         f.render_widget(
             Paragraph::new("  No issue selected.")
                 .style(Style::default().fg(Color::DarkGray))
@@ -250,61 +230,49 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
             area,
         );
         return;
-    }
-    let issue = issue.unwrap();
+    };
 
     let sc = status_color(&issue.status);
     let sym = status_symbol(&issue.status);
-    let desc = issue.description.as_deref().unwrap_or("No description.");
-    let due_str = issue
-        .due_date
+    let desc = issue.description.as_deref().unwrap_or("");
+    let due_str = issue.due_date
         .map(|d| d.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "—".into());
     let created = issue.created_at.format("%Y-%m-%d %H:%M").to_string();
     let updated = issue.updated_at.format("%Y-%m-%d %H:%M").to_string();
-    let completed = issue
-        .completed_at
+    let completed = issue.completed_at
         .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "—".into());
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(format!("  {sym} "), Style::default().fg(sc)),
             Span::styled(
                 issue.title.clone(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(
-                    "   #{} · {}sp · {} · {}",
-                    issue.id,
-                    format_sp(issue.story_points),
-                    issue.status.label(),
-                    issue.epic
-                ),
+                format!("   #{} · {}sp · {} · {}", issue.id, format_sp(issue.story_points), issue.status.label(), issue.epic),
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
-        Line::from(vec![
+    ];
+    if !desc.is_empty() {
+        lines.push(Line::from(vec![
             Span::styled("         ", Style::default()),
             Span::styled(desc, Style::default().fg(Color::Gray)),
-        ]),
-        Line::from(vec![
-            Span::styled("  due ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:<12}", due_str), Style::default().fg(Color::Yellow)),
-            Span::styled("  created ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:<17}", created), Style::default().fg(Color::Gray)),
-            Span::styled("  updated ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:<17}", updated), Style::default().fg(Color::Gray)),
-            Span::styled("  done ", Style::default().fg(Color::DarkGray)),
-            Span::styled(completed, Style::default().fg(Color::Gray)),
-        ]),
-    ];
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("  due ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{:<12}", due_str), Style::default().fg(Color::Yellow)),
+        Span::styled("  created ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{:<17}", created), Style::default().fg(Color::Gray)),
+        Span::styled("  updated ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{:<17}", updated), Style::default().fg(Color::Gray)),
+        Span::styled("  done ", Style::default().fg(Color::DarkGray)),
+        Span::styled(completed, Style::default().fg(Color::Gray)),
+    ]));
 
-    f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(block),
-        area,
-    );
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
 }

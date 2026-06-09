@@ -43,13 +43,15 @@ pub struct SubtaskDraft {
 #[derive(Debug, Clone)]
 pub struct IssueForm {
     pub editing_id: Option<i64>,
+    /// When set, the newly created issue will be added to this sprint.
+    pub sprint_id: Option<i64>,
     pub title: String,
     pub story_points: String,
     pub epic: String,
     pub status_idx: usize,
     pub due_date: String,
     pub description: String,
-    pub focused_field: usize,  // 0=title 1=sp 2=epic 3=status 4=due 5=desc
+    pub focused_field: usize,  // 0=title 1=epic 2=sp 3=status 4=due 5=desc
     pub error: Option<String>,
     /// Whether the epic autocomplete dropdown is visible.
     pub epic_dropdown_open: bool,
@@ -73,6 +75,7 @@ impl IssueForm {
     pub fn new() -> Self {
         IssueForm {
             editing_id: None,
+            sprint_id: None,
             title: String::new(),
             story_points: String::from("1"),
             epic: String::new(),
@@ -95,6 +98,7 @@ impl IssueForm {
     pub fn from_issue(issue: &Issue) -> Self {
         IssueForm {
             editing_id: Some(issue.id),
+            sprint_id: None,
             title: issue.title.clone(),
             story_points: issue.story_points.to_string(),
             epic: issue.epic.clone(),
@@ -119,8 +123,8 @@ impl IssueForm {
     pub fn active_text_field(&mut self) -> Option<&mut String> {
         match self.focused_field {
             0 => Some(&mut self.title),
-            1 => Some(&mut self.story_points),
-            2 => Some(&mut self.epic),
+            1 => Some(&mut self.epic),
+            2 => Some(&mut self.story_points),
             3 => None, // status cycles with h/l
             4 => Some(&mut self.due_date),
             5 => Some(&mut self.description),
@@ -169,7 +173,7 @@ pub struct SprintForm {
 impl SprintForm {
     pub fn new() -> Self {
         let today = Local::now().date_naive();
-        let end = today + chrono::Duration::days(6);
+        let end = today + chrono::Duration::days(4);
         SprintForm {
             editing_id: None,
             name: String::from("Sprint"),
@@ -231,6 +235,14 @@ pub enum Popup {
     ConfirmDelete(i64, String), // (issue_id, issue_title)
     Trash { items: Vec<Issue>, sel: usize },
     Help,
+    /// Gantt epic detail: epic name, issues list, search query, scroll offset
+    GanttEpicDetail {
+        epic: String,
+        issues: Vec<Issue>,
+        search: String,
+        search_active: bool,
+        scroll: usize,
+    },
 }
 
 // ── Undo ─────────────────────────────────────────────────────────────────────
@@ -278,10 +290,16 @@ pub struct App {
     pub backlog_sel: usize,
     /// Kanban: current column (0=Todo 1=InProgress 2=Done)
     pub kanban_col: usize,
-    /// Kanban: selected row within each column
+    /// Kanban: selected row within each column (parent issues panel)
     pub kanban_rows: [usize; 3],
+    /// Kanban: 0=parent panel focused, 1=subtask panel focused
+    pub kanban_panel: usize,
+    /// Kanban: selected subtask row per column (subtask panel)
+    pub kanban_sub_rows: [usize; 3],
     /// Gantt scroll offset (rows)
     pub gantt_scroll: usize,
+    /// Gantt selected epic index (for Enter to open detail popup)
+    pub gantt_sel: usize,
     pub popup: Option<Popup>,
     pub status_msg: Option<String>,
     /// When the current status_msg was set (for auto-expiry).
@@ -300,6 +318,10 @@ pub struct App {
     pub history_issues: Vec<Issue>,
     /// Undo stack — up to 50 entries, most-recent last (pop from end).
     pub undo_stack: Vec<UndoAction>,
+    /// When set, the next kanban column switch should follow this issue (id, target_col).
+    pub pending_kanban_follow: Option<(i64, usize)>,
+    /// Cached sorted unique epic names — refreshed on reload().
+    epics_cache: Vec<String>,
 }
 
 impl App {
@@ -314,6 +336,7 @@ impl App {
             .map(|v| v != "false")
             .unwrap_or(true);
         let display_issues = issues.clone();
+        let epics_cache = Self::build_epics_cache(&issues);
         Ok(App {
             view: View::Backlog,
             db,
@@ -323,7 +346,10 @@ impl App {
             backlog_sel: 0,
             kanban_col: 0,
             kanban_rows: [0, 0, 0],
+            kanban_panel: 0,
+            kanban_sub_rows: [0, 0, 0],
             gantt_scroll: 0,
+            gantt_sel: 0,
             popup: None,
             status_msg: None,
             status_msg_at: None,
@@ -334,18 +360,35 @@ impl App {
             history_sel: 0,
             history_issues: Vec::new(),
             undo_stack: Vec::new(),
+            pending_kanban_follow: None,
+            epics_cache,
         })
     }
 
     pub fn reload(&mut self) -> Result<()> {
         self.issues = self.db.get_all_issues()?;
         self.active_sprint = self.db.get_active_sprint()?;
+        // Refresh epics cache
+        self.epics_cache = Self::build_epics_cache(&self.issues);
         // Clamp selection to valid range
-        let len = self.backlog_items().len();
-        if self.backlog_sel >= len && len > 0 {
-            self.backlog_sel = len - 1;
+        let n = self.backlog_items().len();
+        if self.backlog_sel >= n && n > 0 {
+            self.backlog_sel = n - 1;
         }
         Ok(())
+    }
+
+    fn build_epics_cache(issues: &[Issue]) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut epics: Vec<String> = issues
+            .iter()
+            .filter(|i| !i.epic.is_empty())
+            .filter_map(|i| {
+                if seen.insert(i.epic.clone()) { Some(i.epic.clone()) } else { None }
+            })
+            .collect();
+        epics.sort();
+        epics
     }
 
     /// Refresh display_issues from the live issues list.  Called on view switch
@@ -507,6 +550,7 @@ impl App {
         let q = self.search_query.to_lowercase();
 
         // Build children lookup from the stable snapshot: parent_id → Vec<Issue>
+        // Children preserve the DB order (rank DESC) relative to their parent.
         let mut children_map: std::collections::HashMap<i64, Vec<Issue>> =
             std::collections::HashMap::new();
         for issue in &self.display_issues {
@@ -540,7 +584,8 @@ impl App {
         };
 
         if let Some(sprint) = &self.active_sprint {
-            // Sprint issues: always show Done; search filter still applies
+            // Sprint issues: always show Done; search filter still applies.
+            // display_issues is already sorted by rank DESC so order is preserved.
             let sprint_issues: Vec<Issue> = self
                 .display_issues
                 .iter()
@@ -615,7 +660,7 @@ impl App {
 
     /// All subtasks whose parent is in the active sprint, by status.
     /// Uses display_issues for stable kanban column membership.
-    fn sprint_subtasks_by_status(&self, status: &Status) -> Vec<Issue> {
+    pub fn sprint_subtasks_by_status(&self, status: &Status) -> Vec<Issue> {
         match &self.active_sprint {
             Some(s) => {
                 let sprint_parent_ids: std::collections::HashSet<i64> = self
@@ -656,6 +701,51 @@ impl App {
         items
     }
 
+    /// Top-level sprint issues only (no subtasks), by status.
+    pub fn sprint_parents_by_status(&self, status: &Status) -> Vec<Issue> {
+        match &self.active_sprint {
+            Some(s) => self
+                .display_issues
+                .iter()
+                .filter(|i| i.sprint_id == Some(s.id) && &i.status == status && i.parent_id.is_none())
+                .cloned()
+                .collect(),
+            None => vec![],
+        }
+    }
+
+    /// Whether any sprint parent issue has subtasks.
+    pub fn sprint_has_any_subtasks(&self) -> bool {
+        match &self.active_sprint {
+            Some(s) => {
+                let parent_ids: std::collections::HashSet<i64> = self
+                    .display_issues
+                    .iter()
+                    .filter(|i| i.sprint_id == Some(s.id) && i.parent_id.is_none())
+                    .map(|i| i.id)
+                    .collect();
+                self.display_issues
+                    .iter()
+                    .any(|i| i.parent_id.map(|pid| parent_ids.contains(&pid)).unwrap_or(false))
+            }
+            None => false,
+        }
+    }
+
+    /// The currently selected parent issue in the kanban parent panel.
+    pub fn kanban_selected_parent(&self) -> Option<Issue> {
+        let status = Status::from_index(self.kanban_col);
+        let parents = self.sprint_parents_by_status(&status);
+        parents.into_iter().nth(self.kanban_rows[self.kanban_col])
+    }
+
+    /// The currently selected subtask in the kanban subtask panel.
+    pub fn kanban_selected_subtask(&self) -> Option<Issue> {
+        let status = Status::from_index(self.kanban_col);
+        let subs = self.sprint_subtasks_by_status(&status);
+        subs.into_iter().nth(self.kanban_sub_rows[self.kanban_col])
+    }
+
     /// Subtask count for a given parent issue.
     pub fn subtask_counts(&self, parent_id: i64) -> (usize, usize) {
         let all: Vec<_> = self.issues.iter().filter(|i| i.parent_id == Some(parent_id)).collect();
@@ -682,17 +772,9 @@ impl App {
             .collect()
     }
 
-    /// Unique epics across all issues, sorted alphabetically.
-    pub fn epics(&self) -> Vec<String> {
-        let mut epics: Vec<String> = self
-            .issues
-            .iter()
-            .map(|i| i.epic.clone())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-        epics.sort();
-        epics
+    /// Unique epics across all issues, sorted alphabetically (cached).
+    pub fn epics(&self) -> &[String] {
+        &self.epics_cache
     }
 
     /// Today's date as "YYYY-MM-DD" for the due-date autocomplete.
@@ -764,28 +846,97 @@ impl App {
     }
 
     pub fn kanban_down(&mut self) {
-        let len = self.sprint_issues_by_status(&Status::from_index(self.kanban_col)).len();
-        if len == 0 {
-            return;
-        }
-        let row = &mut self.kanban_rows[self.kanban_col];
-        if *row + 1 < len {
-            *row += 1;
+        let col = self.kanban_col;
+        if self.kanban_panel == 0 {
+            let len = self.sprint_parents_by_status(&Status::from_index(col)).len();
+            if len == 0 { return; }
+            let row = &mut self.kanban_rows[col];
+            if *row + 1 < len { *row += 1; }
+        } else {
+            let len = self.sprint_subtasks_by_status(&Status::from_index(col)).len();
+            if len == 0 { return; }
+            let row = &mut self.kanban_sub_rows[col];
+            if *row + 1 < len { *row += 1; }
         }
     }
 
     pub fn kanban_up(&mut self) {
-        let row = &mut self.kanban_rows[self.kanban_col];
-        if *row > 0 {
-            *row -= 1;
+        let col = self.kanban_col;
+        if self.kanban_panel == 0 {
+            let row = &mut self.kanban_rows[col];
+            if *row > 0 { *row -= 1; }
+        } else {
+            let row = &mut self.kanban_sub_rows[col];
+            if *row > 0 { *row -= 1; }
         }
     }
 
+    /// The currently focused issue (parent or subtask depending on kanban_panel).
     pub fn kanban_selected_issue(&self) -> Option<Issue> {
-        let status = Status::from_index(self.kanban_col);
-        let issues = self.sprint_issues_by_status(&status);
-        let row = self.kanban_rows[self.kanban_col];
-        issues.into_iter().nth(row)
+        if self.kanban_panel == 0 {
+            self.kanban_selected_parent()
+        } else {
+            self.kanban_selected_subtask()
+        }
+    }
+
+    /// After switching kanban columns (or after a status change that moves an issue),
+    /// try to keep focus on the same issue id. Clamps rows for both panels.
+    fn kanban_clamp_and_follow(&mut self, old_id: Option<i64>) {
+        let col = self.kanban_col;
+        let status = Status::from_index(col);
+        let parents = self.sprint_parents_by_status(&status);
+        let subs = self.sprint_subtasks_by_status(&status);
+
+        // Clamp parent row
+        let plen = parents.len();
+        if plen == 0 {
+            self.kanban_rows[col] = 0;
+        } else if self.kanban_rows[col] >= plen {
+            self.kanban_rows[col] = plen - 1;
+        }
+
+        // Clamp subtask row
+        let slen = subs.len();
+        if slen == 0 {
+            self.kanban_sub_rows[col] = 0;
+        } else if self.kanban_sub_rows[col] >= slen {
+            self.kanban_sub_rows[col] = slen - 1;
+        }
+
+        // Check if a pending follow lands in this column
+        if let Some((follow_id, target_col)) = self.pending_kanban_follow {
+            if target_col == col {
+                // Search parents first
+                if let Some(pos) = parents.iter().position(|i| i.id == follow_id) {
+                    self.kanban_rows[col] = pos;
+                    self.kanban_panel = 0;
+                    self.pending_kanban_follow = None;
+                    return;
+                }
+                // Then subtasks
+                if let Some(pos) = subs.iter().position(|i| i.id == follow_id) {
+                    self.kanban_sub_rows[col] = pos;
+                    self.kanban_panel = 1;
+                    self.pending_kanban_follow = None;
+                    return;
+                }
+            }
+            self.pending_kanban_follow = None;
+        }
+
+        // Try to find old focused issue id in parents
+        if let Some(id) = old_id {
+            if let Some(pos) = parents.iter().position(|i| i.id == id) {
+                self.kanban_rows[col] = pos;
+                self.kanban_panel = 0;
+                return;
+            }
+            if let Some(pos) = subs.iter().position(|i| i.id == id) {
+                self.kanban_sub_rows[col] = pos;
+                self.kanban_panel = 1;
+            }
+        }
     }
 
     // ── Key handling ───────────────────────────────────────────────────────────
@@ -884,13 +1035,21 @@ impl App {
     }
 
     fn handle_backlog_key(&mut self, key: KeyEvent) {
+        // Ctrl+j / Ctrl+k for rank reordering
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('j') => { self.backlog_move_rank(1); return; }
+                KeyCode::Char('k') => { self.backlog_move_rank(-1); return; }
+                _ => {}
+            }
+        }
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down => self.backlog_down(),
-            KeyCode::Char('k') | KeyCode::Up => self.backlog_up(),
-            KeyCode::PageDown | KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('j') => self.backlog_down(),
+            KeyCode::Char('k') => self.backlog_up(),
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 for _ in 0..10 { self.backlog_down(); }
             }
-            KeyCode::PageUp | KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 for _ in 0..10 { self.backlog_up(); }
             }
             KeyCode::Char('g') => self.backlog_sel_to_first_issue(),
@@ -920,7 +1079,20 @@ impl App {
                 }
             }
             KeyCode::Char('n') => {
-                self.popup = Some(Popup::NewIssue(IssueForm::new()));
+                let mut form = IssueForm::new();
+                // If currently focused on a sprint item, pre-assign the new issue to that sprint
+                let items = self.backlog_items();
+                let in_sprint = matches!(
+                    items.get(self.backlog_sel),
+                    Some(BacklogItem::Issue(_, true)) | Some(BacklogItem::Subtask(_, true))
+                        | Some(BacklogItem::SprintHeader(_)) | Some(BacklogItem::SprintFooter)
+                );
+                if in_sprint {
+                    if let Some(sprint) = &self.active_sprint {
+                        form.sprint_id = Some(sprint.id);
+                    }
+                }
+                self.popup = Some(Popup::NewIssue(form));
             }
             KeyCode::Char('e') | KeyCode::Enter => {
                 if let Some(issue) = self.selected_issue() {
@@ -983,17 +1155,12 @@ impl App {
             KeyCode::Char('[') => {
                 self.backlog_advance_status(-1);
             }
-            KeyCode::Char('R') => {
-                self.backlog_move_rank(-1); // move selected issue up (higher priority)
-            }
-            KeyCode::Char('r') => {
-                self.backlog_move_rank(1); // move selected issue down (lower priority)
-            }
             _ => {}
         }
     }
 
     /// Move the selected issue up (-1) or down (+1) in rank order.
+    /// "Up" in the display (Ctrl-K) = higher rank value = appears first in rank DESC sort.
     fn backlog_move_rank(&mut self, dir: i32) {
         let items = self.backlog_items();
         // Only works on top-level issues (not subtasks, not headers)
@@ -1002,7 +1169,8 @@ impl App {
             _ => return,
         };
 
-        // Collect the peer issues (same context: same sprint_id / both backlog)
+        // Collect peer issues (same sprint_id context) in current display order.
+        // display_issues is rank DESC sorted, so peers are already in display order.
         let peers: Vec<Issue> = items.iter().filter_map(|bi| {
             if let BacklogItem::Issue(i, _) = bi {
                 if i.sprint_id == current_issue.sprint_id {
@@ -1012,12 +1180,13 @@ impl App {
             None
         }).collect();
 
-        let pos = peers.iter().position(|i| i.id == current_issue.id);
-        let pos = match pos {
+        let pos = match peers.iter().position(|i| i.id == current_issue.id) {
             Some(p) => p,
             None => return,
         };
 
+        // dir=-1 means move up in display (Ctrl-K) = swap with the peer above (lower index)
+        // dir=+1 means move down in display (Ctrl-J) = swap with the peer below (higher index)
         let swap_pos = if dir < 0 {
             if pos == 0 { return; }
             pos - 1
@@ -1035,7 +1204,7 @@ impl App {
         }
         let _ = self.reload();
         self.flush_display();
-        // Move the selection to follow the issue
+        // Move the selection to follow the issue in its new position
         let new_items = self.backlog_items();
         if let Some(new_pos) = new_items.iter().position(|bi| {
             matches!(bi, BacklogItem::Issue(i, _) if i.id == current_issue.id)
@@ -1091,71 +1260,46 @@ impl App {
 
     fn handle_kanban_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('h') | KeyCode::Left => {
+            KeyCode::Char('h') => {
                 if self.kanban_col > 0 {
+                    let focused_id = self.kanban_selected_issue().map(|i| i.id);
                     self.kanban_col -= 1;
+                    self.kanban_clamp_and_follow(focused_id);
                 }
             }
-            KeyCode::Char('l') | KeyCode::Right => {
+            KeyCode::Char('l') => {
                 if self.kanban_col < 2 {
+                    let focused_id = self.kanban_selected_issue().map(|i| i.id);
                     self.kanban_col += 1;
+                    self.kanban_clamp_and_follow(focused_id);
                 }
             }
-            KeyCode::Char('j') | KeyCode::Down => self.kanban_down(),
-            KeyCode::Char('k') | KeyCode::Up => self.kanban_up(),
-            KeyCode::Char(']') => {
-                if let Some(issue) = self.kanban_selected_issue() {
-                    if !issue.is_subtask() && self.has_subtasks(issue.id) {
-                        self.set_status("Status is managed by subtasks.");
+            KeyCode::Tab => {
+                // Switch between parent and subtask panels (only if subtasks exist)
+                if self.sprint_has_any_subtasks() {
+                    self.kanban_panel = 1 - self.kanban_panel;
+                    // Clamp the newly focused panel's row
+                    let col = self.kanban_col;
+                    let status = Status::from_index(col);
+                    if self.kanban_panel == 1 {
+                        let len = self.sprint_subtasks_by_status(&status).len();
+                        if self.kanban_sub_rows[col] >= len.max(1) {
+                            self.kanban_sub_rows[col] = len.saturating_sub(1);
+                        }
                     } else {
-                        let new_status = issue.status.next();
-                        if new_status != issue.status {
-                            self.push_undo(UndoAction::StatusChange {
-                                issue_id: issue.id,
-                                old_status: issue.status.clone(),
-                                parent_id: issue.parent_id,
-                            });
-                            let _ = self.db.update_issue_status(issue.id, &new_status);
-                            let _ = self.reload();
-                            // Patch display in-place — card stays in current column
-                            self.patch_display_status(issue.id, &new_status);
-                            if let Some(pid) = issue.parent_id {
-                                if let Some(parent) = self.issues.iter().find(|i| i.id == pid).cloned() {
-                                    self.patch_display_status(pid, &parent.status);
-                                }
-                            }
+                        let len = self.sprint_parents_by_status(&status).len();
+                        if self.kanban_rows[col] >= len.max(1) {
+                            self.kanban_rows[col] = len.saturating_sub(1);
                         }
                     }
                 }
             }
-            KeyCode::Char('[') => {
-                if let Some(issue) = self.kanban_selected_issue() {
-                    if !issue.is_subtask() && self.has_subtasks(issue.id) {
-                        self.set_status("Status is managed by subtasks.");
-                    } else {
-                        let new_status = issue.status.prev();
-                        if new_status != issue.status {
-                            self.push_undo(UndoAction::StatusChange {
-                                issue_id: issue.id,
-                                old_status: issue.status.clone(),
-                                parent_id: issue.parent_id,
-                            });
-                            let _ = self.db.update_issue_status(issue.id, &new_status);
-                            let _ = self.reload();
-                            // Patch display in-place — card stays in current column
-                            self.patch_display_status(issue.id, &new_status);
-                            if let Some(pid) = issue.parent_id {
-                                if let Some(parent) = self.issues.iter().find(|i| i.id == pid).cloned() {
-                                    self.patch_display_status(pid, &parent.status);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            KeyCode::Char('j') => self.kanban_down(),
+            KeyCode::Char('k') => self.kanban_up(),
+            KeyCode::Char(']') => self.kanban_advance_status(1),
+            KeyCode::Char('[') => self.kanban_advance_status(-1),
             KeyCode::Char('e') | KeyCode::Enter => {
                 if let Some(issue) = self.kanban_selected_issue() {
-                    // For subtasks, open the parent issue's edit form
                     let target = if issue.is_subtask() {
                         issue.parent_id.and_then(|pid| self.issue_by_id(pid).cloned())
                     } else {
@@ -1172,13 +1316,85 @@ impl App {
         }
     }
 
-    fn handle_gantt_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.gantt_scroll = self.gantt_scroll.saturating_add(1);
+    fn kanban_advance_status(&mut self, dir: i32) {
+        let issue = match self.kanban_selected_issue() {
+            Some(i) => i,
+            None => return,
+        };
+        // Parent issues with subtasks: block direct status change
+        if !issue.is_subtask() && self.has_subtasks(issue.id) {
+            self.set_status("Status is managed by subtasks.");
+            return;
+        }
+        let new_status = if dir > 0 { issue.status.next() } else { issue.status.prev() };
+        if new_status == issue.status { return; }
+
+        self.push_undo(UndoAction::StatusChange {
+            issue_id: issue.id,
+            old_status: issue.status.clone(),
+            parent_id: issue.parent_id,
+        });
+        let _ = self.db.update_issue_status(issue.id, &new_status);
+        let _ = self.reload();
+        // Flush display immediately so the issue moves to its new column right now
+        self.flush_display();
+        // Follow the issue: switch column and find it
+        let new_col = new_status.index();
+        self.kanban_col = new_col;
+        let is_sub = issue.is_subtask();
+        if is_sub {
+            self.kanban_panel = 1;
+            let subs = self.sprint_subtasks_by_status(&new_status);
+            if let Some(pos) = subs.iter().position(|i| i.id == issue.id) {
+                self.kanban_sub_rows[new_col] = pos;
+            } else {
+                self.kanban_sub_rows[new_col] = subs.len().saturating_sub(1);
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.gantt_scroll = self.gantt_scroll.saturating_sub(1);
+            // Also update parent status display
+            if let Some(pid) = issue.parent_id {
+                if let Some(parent) = self.issues.iter().find(|i| i.id == pid).cloned() {
+                    self.patch_display_status(pid, &parent.status);
+                }
+            }
+        } else {
+            self.kanban_panel = 0;
+            let parents = self.sprint_parents_by_status(&new_status);
+            if let Some(pos) = parents.iter().position(|i| i.id == issue.id) {
+                self.kanban_rows[new_col] = pos;
+            } else {
+                self.kanban_rows[new_col] = parents.len().saturating_sub(1);
+            }
+        }
+    }
+
+    fn handle_gantt_key(&mut self, key: KeyEvent) {
+        let epic_count = self.epics().len();
+        match key.code {
+            KeyCode::Char('j') => {
+                if epic_count > 0 && self.gantt_sel + 1 < epic_count {
+                    self.gantt_sel += 1;
+                }
+            }
+            KeyCode::Char('k') => {
+                if self.gantt_sel > 0 {
+                    self.gantt_sel -= 1;
+                }
+            }
+            KeyCode::Char('e') | KeyCode::Enter => {
+                let epics = self.epics();
+                if let Some(epic) = epics.get(self.gantt_sel) {
+                    let epic_issues: Vec<Issue> = self.issues.iter()
+                        .filter(|i| i.parent_id.is_none() && &i.epic == epic)
+                        .cloned()
+                        .collect();
+                    self.popup = Some(Popup::GanttEpicDetail {
+                        epic: epic.clone(),
+                        issues: epic_issues,
+                        search: String::new(),
+                        search_active: false,
+                        scroll: 0,
+                    });
+                }
             }
             _ => {}
         }
@@ -1205,16 +1421,21 @@ impl App {
         let len = self.history_sprints.len();
         if len == 0 { return; }
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Char('j') => {
                 if self.history_sel + 1 < len {
                     self.history_sel += 1;
                     self.load_history_issues();
                 }
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Char('k') => {
                 if self.history_sel > 0 {
                     self.history_sel -= 1;
                     self.load_history_issues();
+                }
+            }
+            KeyCode::Char('e') | KeyCode::Enter => {
+                if let Some(sprint) = self.history_sprints.get(self.history_sel) {
+                    self.popup = Some(Popup::SprintManager(SprintForm::from_sprint(sprint)));
                 }
             }
             _ => {}
@@ -1257,11 +1478,11 @@ impl App {
                     KeyCode::Esc | KeyCode::Char('q') => {
                         self.popup = None;
                     }
-                    KeyCode::Char('j') | KeyCode::Down => {
+                    KeyCode::Char('j') => {
                         let len = items.len();
                         if len > 0 && *sel + 1 < len { *sel += 1; }
                     }
-                    KeyCode::Char('k') | KeyCode::Up => {
+                    KeyCode::Char('k') => {
                         if *sel > 0 { *sel -= 1; }
                     }
                     KeyCode::Char('r') => {
@@ -1306,6 +1527,47 @@ impl App {
             Some(Popup::SprintManager(_)) => {
                 self.handle_sprint_form_key(key);
             }
+
+            Some(Popup::GanttEpicDetail { search, search_active, scroll, issues, .. }) => {
+                let issue_count = issues.len();
+                match key.code {
+                    KeyCode::Esc => {
+                        if *search_active {
+                            *search_active = false;
+                            search.clear();
+                            *scroll = 0;
+                        } else {
+                            self.popup = None;
+                        }
+                    }
+                    KeyCode::Char('q') if !*search_active => {
+                        self.popup = None;
+                    }
+                    KeyCode::Char('/') if !*search_active => {
+                        *search_active = true;
+                    }
+                    KeyCode::Enter if *search_active => {
+                        *search_active = false;
+                    }
+                    KeyCode::Backspace if *search_active => {
+                        search.pop();
+                        *scroll = 0;
+                    }
+                    KeyCode::Char(c) if *search_active => {
+                        search.push(c);
+                        *scroll = 0;
+                    }
+                    KeyCode::Char('j') => {
+                        if issue_count > 0 && *scroll + 1 < issue_count {
+                            *scroll += 1;
+                        }
+                    }
+                    KeyCode::Char('k') => {
+                        *scroll = scroll.saturating_sub(1);
+                    }
+                    _ => {}
+                }
+            }
         }
         false
     }
@@ -1335,16 +1597,69 @@ impl App {
                 return;
             }
             KeyCode::Tab => {
-                popup.epic_dropdown_open = false;
-                popup.due_date_dropdown_open = false;
-                let next = popup.focused_field + 1;
+                // If epic dropdown is open, commit selected item then advance
+                if popup.focused_field == 1 && popup.epic_dropdown_open {
+                    let q = popup.epic.to_lowercase();
+                    let sorted: Vec<String> = self.epics_cache.iter()
+                        .filter(|e| e.to_lowercase().contains(&q))
+                        .cloned()
+                        .collect();
+                    let popup2 = match &mut self.popup {
+                        Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
+                        _ => return,
+                    };
+                    let sel = popup2.epic_dropdown_sel.min(sorted.len().saturating_sub(1));
+                    if let Some(chosen) = sorted.into_iter().nth(sel) {
+                        popup2.epic = chosen;
+                    }
+                    popup2.epic_dropdown_open = false;
+                    popup2.epic_dropdown_sel = 0;
+                    let next = popup2.focused_field + 1;
+                    if next >= IssueForm::field_count() {
+                        popup2.in_subtask_list = true;
+                        popup2.subtask_sel = 0;
+                        popup2.subtask_editing = false;
+                    } else {
+                        popup2.focused_field = next;
+                        if popup2.focused_field == 4 {
+                            popup2.due_date_dropdown_open = true;
+                            popup2.due_date_dropdown_sel = 0;
+                        }
+                    }
+                    return;
+                }
+                let popup2 = match &mut self.popup {
+                    Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
+                    _ => return,
+                };
+                popup2.epic_dropdown_open = false;
+                popup2.due_date_dropdown_open = false;
+                let next = popup2.focused_field + 1;
                 if next >= IssueForm::field_count() {
                     // Move focus into subtask list
+                    popup2.in_subtask_list = true;
+                    popup2.subtask_sel = 0;
+                    popup2.subtask_editing = false;
+                } else {
+                    popup2.focused_field = next % IssueForm::field_count();
+                    // Auto-open due-date dropdown when focusing the due field
+                    if popup2.focused_field == 4 {
+                        popup2.due_date_dropdown_open = true;
+                        popup2.due_date_dropdown_sel = 0;
+                    }
+                }
+                return;
+            }
+            KeyCode::BackTab => {
+                popup.epic_dropdown_open = false;
+                popup.due_date_dropdown_open = false;
+                if popup.focused_field == 0 {
+                    // At first field — shift-tab wraps into the subtask list
                     popup.in_subtask_list = true;
                     popup.subtask_sel = 0;
                     popup.subtask_editing = false;
                 } else {
-                    popup.focused_field = next % IssueForm::field_count();
+                    popup.focused_field -= 1;
                     // Auto-open due-date dropdown when focusing the due field
                     if popup.focused_field == 4 {
                         popup.due_date_dropdown_open = true;
@@ -1353,49 +1668,24 @@ impl App {
                 }
                 return;
             }
-            KeyCode::BackTab => {
-                popup.epic_dropdown_open = false;
-                popup.due_date_dropdown_open = false;
-                popup.focused_field =
-                    (popup.focused_field + IssueForm::field_count() - 1) % IssueForm::field_count();
-                // Auto-open due-date dropdown when focusing the due field
-                if popup.focused_field == 4 {
-                    popup.due_date_dropdown_open = true;
-                    popup.due_date_dropdown_sel = 0;
-                }
-                return;
-            }
             KeyCode::Enter => {
                 // If dropdown open, commit selected epic and close instead of saving form
                 if popup.epic_dropdown_open {
                     let q = popup.epic.to_lowercase();
-                    let matches: Vec<String> = self
-                        .issues
-                        .iter()
-                        .map(|i| i.epic.clone())
-                        .collect::<std::collections::HashSet<_>>()
-                        .into_iter()
+                    let sorted: Vec<String> = self.epics_cache.iter()
                         .filter(|e| e.to_lowercase().contains(&q))
-                        .collect::<Vec<_>>();
-                    let mut sorted = matches;
-                    sorted.sort();
+                        .cloned()
+                        .collect();
                     let sel = popup.epic_dropdown_sel.min(sorted.len().saturating_sub(1));
+                    let popup = match &mut self.popup {
+                        Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
+                        _ => return,
+                    };
                     if let Some(chosen) = sorted.into_iter().nth(sel) {
-                        // Re-borrow popup after self usage
-                        let popup = match &mut self.popup {
-                            Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
-                            _ => return,
-                        };
                         popup.epic = chosen;
-                        popup.epic_dropdown_open = false;
-                        popup.epic_dropdown_sel = 0;
-                    } else {
-                        let popup = match &mut self.popup {
-                            Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
-                            _ => return,
-                        };
-                        popup.epic_dropdown_open = false;
                     }
+                    popup.epic_dropdown_open = false;
+                    popup.epic_dropdown_sel = 0;
                     return;
                 }
 
@@ -1432,6 +1722,7 @@ impl App {
                 }
                 // Extract needed data before borrow ends
                 let editing_id = popup.editing_id;
+                let new_issue_sprint_id = popup.sprint_id;
                 let title = popup.title.trim().to_string();
                 let sp = popup.story_points.parse::<f64>().unwrap_or(1.0);
                 let epic = popup.epic.trim().to_string();
@@ -1484,6 +1775,13 @@ impl App {
                 } else {
                     self.db.create_issue(&title, sp, &epic, &status, due_date, desc.as_deref())
                 };
+
+                // If this is a new issue with a pre-assigned sprint, add it now
+                if editing_id.is_none() {
+                    if let (Ok(new_id), Some(sid)) = (&id_result, new_issue_sprint_id) {
+                        let _ = self.db.set_issue_sprint(*new_id, Some(sid));
+                    }
+                }
 
                 match id_result {
                     Err(e) => self.set_status(format!("Error: {e}")),
@@ -1551,41 +1849,36 @@ impl App {
         popup.error = None;
 
         if popup.focused_field == 3 {
-            // Status field: h/l or left/right to cycle
+            // Status field: h/l to cycle
             match key.code {
-                KeyCode::Char('h') | KeyCode::Left => {
+                KeyCode::Char('h') => {
                     if popup.status_idx > 0 {
                         popup.status_idx -= 1;
                     }
                 }
-                KeyCode::Char('l') | KeyCode::Right => {
+                KeyCode::Char('l') => {
                     if popup.status_idx < 2 {
                         popup.status_idx += 1;
                     }
                 }
                 _ => {}
             }
-        } else if popup.focused_field == 2 && popup.epic_dropdown_open {
+        } else if popup.focused_field == 1 && popup.epic_dropdown_open {
             // Epic dropdown navigation — commit selection on Enter/Tab
             match key.code {
-                KeyCode::Down => {
+                KeyCode::Char('j') => {
                     popup.epic_dropdown_sel = popup.epic_dropdown_sel.saturating_add(1);
                 }
-                KeyCode::Up => {
+                KeyCode::Char('k') => {
                     popup.epic_dropdown_sel = popup.epic_dropdown_sel.saturating_sub(1);
                 }
                 KeyCode::Tab => {
                     // Commit then advance field
                     let q = popup.epic.to_lowercase();
-                    let mut sorted: Vec<String> = self
-                        .issues
-                        .iter()
-                        .map(|i| i.epic.clone())
-                        .collect::<std::collections::HashSet<_>>()
-                        .into_iter()
+                    let sorted: Vec<String> = self.epics_cache.iter()
                         .filter(|e| e.to_lowercase().contains(&q))
+                        .cloned()
                         .collect();
-                    sorted.sort();
                     let sel = popup.epic_dropdown_sel.min(sorted.len().saturating_sub(1));
                     let popup = match &mut self.popup {
                         Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
@@ -1620,10 +1913,10 @@ impl App {
         } else if popup.focused_field == 4 && popup.due_date_dropdown_open {
             // Due-date dropdown navigation
             match key.code {
-                KeyCode::Down => {
+                KeyCode::Char('j') => {
                     popup.due_date_dropdown_sel = popup.due_date_dropdown_sel.saturating_add(1);
                 }
-                KeyCode::Up => {
+                KeyCode::Char('k') => {
                     popup.due_date_dropdown_sel = popup.due_date_dropdown_sel.saturating_sub(1);
                 }
                 KeyCode::Tab => {
@@ -1682,7 +1975,7 @@ impl App {
                         field.pop();
                     }
                     // Open dropdown if we're on the epic field
-                    if popup.focused_field == 2 {
+                    if popup.focused_field == 1 {
                         popup.epic_dropdown_open = !popup.epic.is_empty();
                         popup.epic_dropdown_sel = 0;
                     }
@@ -1695,7 +1988,7 @@ impl App {
                 KeyCode::Char(c) => {
                     field.push(c);
                     // Open epic dropdown on any char input in epic field
-                    if popup.focused_field == 2 {
+                    if popup.focused_field == 1 {
                         popup.epic_dropdown_open = true;
                         popup.epic_dropdown_sel = 0;
                     }
@@ -1784,14 +2077,14 @@ impl App {
                 self.handle_issue_form_key(key);
                 return;
             }
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Char('j') => {
                 let visible_len = popup.subtasks.iter().filter(|s| !s.deleted).count();
                 if visible_len > 0 && popup.subtask_sel + 1 < visible_len {
                     popup.subtask_sel += 1;
                 }
                 return;
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Char('k') => {
                 if popup.subtask_sel > 0 {
                     popup.subtask_sel -= 1;
                 }
@@ -1897,6 +2190,10 @@ impl App {
                     Ok(_) => {
                         let _ = self.reload();
                         self.flush_display();
+                        // Refresh history list if we're in that view
+                        if self.view == View::SprintHistory {
+                            self.load_sprint_history();
+                        }
                         self.set_status("Sprint saved.");
                     }
                 }
@@ -1914,8 +2211,7 @@ impl App {
         if popup.focused_field == 3 {
             // Boolean toggle
             match key.code {
-                KeyCode::Char(' ') | KeyCode::Char('h') | KeyCode::Char('l')
-                | KeyCode::Left | KeyCode::Right => {
+                KeyCode::Char(' ') | KeyCode::Char('h') | KeyCode::Char('l') => {
                     popup.is_active = !popup.is_active;
                 }
                 _ => {}

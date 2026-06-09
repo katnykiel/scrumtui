@@ -111,8 +111,7 @@ impl Db {
              FROM issues
              WHERE deleted_at IS NULL
              ORDER BY (sprint_id IS NULL),
-                      parent_id IS NOT NULL,
-                      updated_at DESC,
+                      rank DESC,
                       id DESC",
         )?;
         let issues = stmt
@@ -441,21 +440,27 @@ impl Db {
     }
 
     /// Swap the rank values of two issues (used for reordering in the backlog).
-    /// Also equalises their updated_at so they sort adjacently in the updated_at DESC order.
     pub fn swap_rank(&self, id_a: i64, id_b: i64) -> Result<()> {
         let rank_a: i64 = self.conn.query_row(
             "SELECT rank FROM issues WHERE id = ?1", params![id_a], |r| r.get(0))?;
         let rank_b: i64 = self.conn.query_row(
             "SELECT rank FROM issues WHERE id = ?1", params![id_b], |r| r.get(0))?;
-        // Use the same timestamp for both so they share an updated_at bucket,
-        // letting the rank tiebreaker determine their relative order.
-        let now = now_str();
+        // If ranks are equal (legacy data), assign distinct values first
+        if rank_a == rank_b {
+            self.conn.execute(
+                "UPDATE issues SET rank = ?1 WHERE id = ?2",
+                params![rank_a + 1, id_a])?;
+            self.conn.execute(
+                "UPDATE issues SET rank = ?1 WHERE id = ?2",
+                params![rank_b, id_b])?;
+            return Ok(());
+        }
         self.conn.execute(
-            "UPDATE issues SET rank = ?1, updated_at = ?2 WHERE id = ?3",
-            params![rank_b, now, id_a])?;
+            "UPDATE issues SET rank = ?1 WHERE id = ?2",
+            params![rank_b, id_a])?;
         self.conn.execute(
-            "UPDATE issues SET rank = ?1, updated_at = ?2 WHERE id = ?3",
-            params![rank_a, now, id_b])?;
+            "UPDATE issues SET rank = ?1 WHERE id = ?2",
+            params![rank_a, id_b])?;
         Ok(())
     }
 
@@ -520,7 +525,7 @@ impl Db {
                     sprint_id, created_at, updated_at, completed_at, parent_id, rank
              FROM issues
              WHERE sprint_id = ?1 AND parent_id IS NULL
-             ORDER BY rank, id",
+             ORDER BY rank DESC, id DESC",
         )?;
         let issues = stmt.query_map(params![sprint_id], |row| {
             let status_str: String = row.get(4)?;
