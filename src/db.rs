@@ -497,11 +497,11 @@ impl Db {
 
     // ── Sprints ───────────────────────────────────────────────────────────────
 
-    /// Return all sprints ordered newest first (by id desc).
+    /// Return all sprints ordered by end_date descending (most recently completed first).
     pub fn get_all_sprints(&self) -> Result<Vec<Sprint>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, start_date, end_date, is_active, created_at
-             FROM sprints ORDER BY id DESC",
+             FROM sprints ORDER BY end_date DESC, id DESC",
         )?;
         let sprints = stmt.query_map([], |row| {
             Ok(Sprint {

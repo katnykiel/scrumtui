@@ -61,6 +61,10 @@ pub struct IssueForm {
     pub due_date_dropdown_open: bool,
     /// Selected row in the due-date dropdown.
     pub due_date_dropdown_sel: usize,
+    /// Whether the status picker dropdown is open.
+    pub status_dropdown_open: bool,
+    /// Selected row in the status dropdown (0=Todo 1=InProgress 2=Done).
+    pub status_dropdown_sel: usize,
     /// Subtasks (only populated when editing an existing issue).
     pub subtasks: Vec<SubtaskDraft>,
     /// Selected row in the subtask list.
@@ -88,6 +92,8 @@ impl IssueForm {
             epic_dropdown_sel: 0,
             due_date_dropdown_open: false,
             due_date_dropdown_sel: 0,
+            status_dropdown_open: false,
+            status_dropdown_sel: 0,
             subtasks: Vec::new(),
             subtask_sel: 0,
             in_subtask_list: false,
@@ -111,6 +117,8 @@ impl IssueForm {
             epic_dropdown_sel: 0,
             due_date_dropdown_open: false,
             due_date_dropdown_sel: 0,
+            status_dropdown_open: false,
+            status_dropdown_sel: 0,
             subtasks: Vec::new(),
             subtask_sel: 0,
             in_subtask_list: false,
@@ -727,11 +735,23 @@ impl App {
         parents.into_iter().nth(self.kanban_rows[self.kanban_col])
     }
 
-    /// The currently selected subtask in the kanban subtask panel.
+    /// All subtasks of the focused parent, across all statuses (flat list for the sub panel).
+    pub fn sprint_subtasks_flat(&self) -> Vec<Issue> {
+        match self.kanban_sub_parent() {
+            Some(parent) => self
+                .display_issues
+                .iter()
+                .filter(|i| i.parent_id == Some(parent.id))
+                .cloned()
+                .collect(),
+            None => vec![],
+        }
+    }
+
+    /// The currently selected subtask in the kanban subtask panel (flat list).
     pub fn kanban_selected_subtask(&self) -> Option<Issue> {
-        let status = Status::from_index(self.kanban_col);
-        let subs = self.sprint_subtasks_by_status(&status);
-        subs.into_iter().nth(self.kanban_sub_rows[self.kanban_col])
+        let subs = self.sprint_subtasks_flat();
+        subs.into_iter().nth(self.kanban_sub_rows[0])
     }
 
     /// Subtask count for a given parent issue.
@@ -841,10 +861,10 @@ impl App {
             let row = &mut self.kanban_rows[col];
             if *row + 1 < len { *row += 1; }
         } else {
-            let len = self.sprint_subtasks_by_status(&Status::from_index(col)).len();
+            // Flat sub panel
+            let len = self.sprint_subtasks_flat().len();
             if len == 0 { return; }
-            let row = &mut self.kanban_sub_rows[col];
-            if *row + 1 < len { *row += 1; }
+            if self.kanban_sub_rows[0] + 1 < len { self.kanban_sub_rows[0] += 1; }
         }
     }
 
@@ -854,8 +874,8 @@ impl App {
             let row = &mut self.kanban_rows[col];
             if *row > 0 { *row -= 1; }
         } else {
-            let row = &mut self.kanban_sub_rows[col];
-            if *row > 0 { *row -= 1; }
+            // Flat sub panel
+            if self.kanban_sub_rows[0] > 0 { self.kanban_sub_rows[0] -= 1; }
         }
     }
 
@@ -884,12 +904,13 @@ impl App {
             self.kanban_rows[col] = plen - 1;
         }
 
-        // Clamp subtask row
-        let slen = subs.len();
-        if slen == 0 {
-            self.kanban_sub_rows[col] = 0;
-        } else if self.kanban_sub_rows[col] >= slen {
-            self.kanban_sub_rows[col] = slen - 1;
+        // Clamp flat subtask row
+        let _ = subs; // no longer used per-column
+        let flat_len = self.sprint_subtasks_flat().len();
+        if flat_len == 0 {
+            self.kanban_sub_rows[0] = 0;
+        } else if self.kanban_sub_rows[0] >= flat_len {
+            self.kanban_sub_rows[0] = flat_len - 1;
         }
 
         // Check if a pending follow lands in this column
@@ -1275,12 +1296,10 @@ impl App {
                                 self.kanban_sub_parent_idx = pos;
                             }
                         }
-                        // Clamp subtask row
-                        let col = self.kanban_col;
-                        let status = Status::from_index(col);
-                        let len = self.sprint_subtasks_by_status(&status).len();
-                        if self.kanban_sub_rows[col] >= len.max(1) {
-                            self.kanban_sub_rows[col] = len.saturating_sub(1);
+                        // Clamp flat subtask row
+                        let len = self.sprint_subtasks_flat().len();
+                        if self.kanban_sub_rows[0] >= len.max(1) {
+                            self.kanban_sub_rows[0] = len.saturating_sub(1);
                         }
                     } else {
                         let col = self.kanban_col;
@@ -1299,14 +1318,11 @@ impl App {
                     if self.kanban_sub_parent_idx > 0 {
                         self.kanban_sub_parent_idx -= 1;
                     } else if len > 0 {
-                        self.kanban_sub_parent_idx = len - 1; // wrap around
+                        self.kanban_sub_parent_idx = len - 1;
                     }
-                    // Clamp sub row
-                    let col = self.kanban_col;
-                    let status = Status::from_index(col);
-                    let sub_len = self.sprint_subtasks_by_status(&status).len();
-                    if self.kanban_sub_rows[col] >= sub_len.max(1) {
-                        self.kanban_sub_rows[col] = sub_len.saturating_sub(1);
+                    let sub_len = self.sprint_subtasks_flat().len();
+                    if self.kanban_sub_rows[0] >= sub_len.max(1) {
+                        self.kanban_sub_rows[0] = sub_len.saturating_sub(1);
                     }
                 }
             }
@@ -1316,12 +1332,9 @@ impl App {
                     if len > 0 {
                         self.kanban_sub_parent_idx = (self.kanban_sub_parent_idx + 1) % len;
                     }
-                    // Clamp sub row
-                    let col = self.kanban_col;
-                    let status = Status::from_index(col);
-                    let sub_len = self.sprint_subtasks_by_status(&status).len();
-                    if self.kanban_sub_rows[col] >= sub_len.max(1) {
-                        self.kanban_sub_rows[col] = sub_len.saturating_sub(1);
+                    let sub_len = self.sprint_subtasks_flat().len();
+                    if self.kanban_sub_rows[0] >= sub_len.max(1) {
+                        self.kanban_sub_rows[0] = sub_len.saturating_sub(1);
                     }
                 }
             }
@@ -1375,11 +1388,12 @@ impl App {
         let is_sub = issue.is_subtask();
         if is_sub {
             self.kanban_panel = 1;
-            let subs = self.sprint_subtasks_by_status(&new_status);
+            // Flat sub panel: find position in all-status flat list, keep col unchanged
+            let subs = self.sprint_subtasks_flat();
             if let Some(pos) = subs.iter().position(|i| i.id == issue.id) {
-                self.kanban_sub_rows[new_col] = pos;
+                self.kanban_sub_rows[0] = pos;
             } else {
-                self.kanban_sub_rows[new_col] = subs.len().saturating_sub(1);
+                self.kanban_sub_rows[0] = subs.len().saturating_sub(1);
             }
             // Also update parent status display
             if let Some(pid) = issue.parent_id {
@@ -1683,10 +1697,36 @@ impl App {
                     popup.due_date_dropdown_open = false;
                     return;
                 }
+                if popup.status_dropdown_open {
+                    popup.status_dropdown_open = false;
+                    return;
+                }
                 self.popup = None;
                 return;
             }
             KeyCode::Tab => {
+                // Close status dropdown on Tab (commits current selection)
+                if popup.focused_field == 3 && popup.status_dropdown_open {
+                    let popup2 = match &mut self.popup {
+                        Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
+                        _ => return,
+                    };
+                    popup2.status_idx = popup2.status_dropdown_sel;
+                    popup2.status_dropdown_open = false;
+                    let next = popup2.focused_field + 1;
+                    if next >= IssueForm::field_count() {
+                        popup2.in_subtask_list = true;
+                        popup2.subtask_sel = 0;
+                        popup2.subtask_editing = false;
+                    } else {
+                        popup2.focused_field = next;
+                        if popup2.focused_field == 4 {
+                            popup2.due_date_dropdown_open = true;
+                            popup2.due_date_dropdown_sel = 0;
+                        }
+                    }
+                    return;
+                }
                 // If epic dropdown is open, commit selected item then advance
                 if popup.focused_field == 1 && popup.epic_dropdown_open {
                     let q = popup.epic.to_lowercase();
@@ -1944,17 +1984,31 @@ impl App {
         popup.error = None;
 
         if popup.focused_field == 3 {
-            // Status field: [ / ] to cycle (consistent with rest of UI)
-            match key.code {
-                KeyCode::Char('[') | KeyCode::Char('h') => {
-                    if popup.status_idx > 0 {
-                        popup.status_idx -= 1;
+            if popup.status_dropdown_open {
+                // Dropdown navigation
+                match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if popup.status_dropdown_sel < 2 { popup.status_dropdown_sel += 1; }
                     }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if popup.status_dropdown_sel > 0 { popup.status_dropdown_sel -= 1; }
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        popup.status_idx = popup.status_dropdown_sel;
+                        popup.status_dropdown_open = false;
+                    }
+                    KeyCode::Esc => {
+                        popup.status_dropdown_open = false;
+                    }
+                    _ => {}
                 }
-                KeyCode::Char(']') | KeyCode::Char('l') => {
-                    if popup.status_idx < 2 {
-                        popup.status_idx += 1;
-                    }
+                return;
+            }
+            // Status field not open: any printable key or Enter/Space opens the dropdown
+            match key.code {
+                KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('[') | KeyCode::Char(']') => {
+                    popup.status_dropdown_sel = popup.status_idx;
+                    popup.status_dropdown_open = true;
                 }
                 _ => {}
             }

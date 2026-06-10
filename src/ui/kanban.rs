@@ -60,12 +60,9 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let detail_area = v_chunks[1];
 
     if has_subs {
-        // Size subtask panel to fit its content (for focused parent), cap at half the board height
-        let sub_max: usize = (0..3)
-            .map(|c| app.sprint_subtasks_by_status(&Status::from_index(c)).len())
-            .max()
-            .unwrap_or(0);
-        let sub_h = ((sub_max + 3) as u16).max(4).min(board_area.height / 2);
+        // Subtask bar height: enough for all subtasks of focused parent + 2 for header border
+        let sub_count = app.sprint_subtasks_flat().len();
+        let sub_h = ((sub_count + 2) as u16).max(3).min(board_area.height / 2);
         let parent_h = board_area.height.saturating_sub(sub_h);
 
         let panels = Layout::default()
@@ -74,7 +71,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             .split(board_area);
 
         render_board(f, app, panels[0], false);
-        render_board(f, app, panels[1], true);
+        render_subtask_bar(f, app, panels[1]);
     } else {
         render_board(f, app, board_area, false);
     }
@@ -91,8 +88,88 @@ fn render_board(f: &mut Frame, app: &mut App, area: Rect, is_sub_panel: bool) {
         .split(area);
 
     for (col_idx, status) in STATUSES.iter().enumerate() {
-        render_column(f, app, cols[col_idx], col_idx, status, is_sub_panel, panel_focused);
+        render_column(f, app, cols[col_idx], col_idx, status, panel_focused);
     }
+}
+
+fn render_subtask_bar(f: &mut Frame, app: &mut App, area: Rect) {
+    let is_focused = app.kanban_panel == 1;
+    let parents = app.sprint_parents_with_subtasks();
+    let n = parents.len();
+    let idx = app.kanban_sub_parent_idx.min(n.saturating_sub(1));
+    let parent_name = parents.get(idx)
+        .map(|p| p.title.as_str())
+        .unwrap_or("");
+
+    let border_color = if is_focused { Color::Magenta } else { Color::Rgb(60, 60, 90) };
+    let title_style = if is_focused {
+        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let cycle_hint = if n > 1 {
+        format!(" [</>]  {} / {}  {} ", idx + 1, n, parent_name)
+    } else {
+        format!("  {} ", parent_name)
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .title(Line::from(vec![
+            Span::raw(" "),
+            Span::styled("subtasks", title_style),
+            Span::raw(" "),
+        ]))
+        .title_bottom(Line::from(Span::styled(
+            cycle_hint,
+            Style::default().fg(Color::DarkGray),
+        )));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let subtasks = app.sprint_subtasks_flat();
+    let sel_row = app.kanban_sub_rows[0];
+    let w = inner.width as usize;
+
+    let items: Vec<ListItem> = subtasks.iter().enumerate().map(|(row, issue)| {
+        let is_sel = is_focused && row == sel_row;
+        let pointer = if is_sel { "▶" } else { " " };
+        let is_done = issue.status == Status::Done;
+        let title_style = if is_done {
+            Style::default().fg(Color::DarkGray)
+        } else if is_sel {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let sym = status_symbol(&issue.status);
+        let sc = status_color(&issue.status);
+        let due_str = issue.due_date
+            .map(|d| format!("  {}", d.format("%b %d")))
+            .unwrap_or_default();
+        let title_max = w.saturating_sub(6 + due_str.len());
+        ListItem::new(Line::from(vec![
+            Span::styled(format!(" {pointer} "), Style::default().fg(Color::Magenta)),
+            Span::styled(format!("{sym} "), Style::default().fg(sc)),
+            Span::styled(trunc(&issue.title, title_max), title_style),
+            Span::styled(due_str, Style::default().fg(
+                issue.due_date.map(|d| due_color(&d, is_done)).unwrap_or(Color::DarkGray)
+            )),
+        ]))
+    }).collect();
+
+    let mut list_state = ratatui::widgets::ListState::default();
+    if is_focused && !subtasks.is_empty() {
+        list_state.select(Some(sel_row.min(subtasks.len().saturating_sub(1))));
+    }
+
+    let list = List::new(items)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
+    f.render_stateful_widget(list, inner, &mut list_state);
 }
 
 fn render_column(
@@ -101,23 +178,13 @@ fn render_column(
     area: Rect,
     col_idx: usize,
     status: &Status,
-    is_sub_panel: bool,
     panel_focused: bool,
 ) {
     let is_active_col = app.kanban_col == col_idx && panel_focused;
     let sc = status_color(status);
 
-    let issues: Vec<Issue> = if is_sub_panel {
-        app.sprint_subtasks_by_status(status)
-    } else {
-        app.sprint_parents_by_status(status)
-    };
-
-    let selected_row = if is_sub_panel {
-        app.kanban_sub_rows[col_idx]
-    } else {
-        app.kanban_rows[col_idx]
-    };
+    let issues: Vec<Issue> = app.sprint_parents_by_status(status);
+    let selected_row = app.kanban_rows[col_idx];
 
     // Active col in focused panel uses the status color; everything else is dim purple
     let border_color = if is_active_col { sc } else { Color::Rgb(60, 60, 90) };
@@ -131,26 +198,11 @@ fn render_column(
     let sym = status_symbol(status);
     let total_sp: f64 = issues.iter().map(|i| i.story_points).sum();
     let sp_str = if total_sp > 0.0 { format!("  {}sp", format_sp(total_sp)) } else { String::new() };
-
-    let header_text = if is_sub_panel {
-        let parents = app.sprint_parents_with_subtasks();
-        let n = parents.len();
-        let idx = app.kanban_sub_parent_idx.min(n.saturating_sub(1));
-        let parent_name = parents.get(idx)
-            .map(|p| trunc(&p.title, area.width.saturating_sub(20) as usize))
-            .unwrap_or_default();
-        if n > 1 {
-            format!("  ◀ {}/{} ▶  {}  {}{}", idx + 1, n, parent_name, issues.len(), sp_str)
-        } else {
-            format!("  {}  {}{}", parent_name, issues.len(), sp_str)
-        }
-    } else {
-        format!("  {sym} {}  {}  {}{}", status.label(), "·", issues.len(), sp_str)
-    };
+    let header_text = format!("  {sym} {}  {}  {}{}", status.label(), "·", issues.len(), sp_str);
     let header_style = if is_active_col {
         Style::default().fg(sc).add_modifier(Modifier::BOLD | Modifier::REVERSED)
     } else {
-        Style::default().fg(if is_sub_panel { Color::Magenta } else { sc }).add_modifier(Modifier::BOLD)
+        Style::default().fg(sc).add_modifier(Modifier::BOLD)
     };
 
     f.render_widget(
@@ -172,47 +224,29 @@ fn render_column(
             let pointer = if is_sel { "▶" } else { " " };
             let title_w = col_w.saturating_sub(4);
             let is_done = issue.status == Status::Done;
-
-            if is_sub_panel {
-                let title_style = if is_done {
-                    Style::default().fg(Color::DarkGray)
-                } else {
-                    Style::default().fg(Color::Gray)
-                };
-                let due_str = issue.due_date.map(|d| format!("  {}", d.format("%b %d"))).unwrap_or_default();
-                ListItem::new(Line::from(vec![
+            let (done_subs, total_subs) = app.subtask_counts(issue.id);
+            let sub_badge = if total_subs > 0 { format!("  [{}/{}]", done_subs, total_subs) } else { String::new() };
+            let due_str = issue.due_date.map(|d| format!("  {}", d.format("%b %d"))).unwrap_or_default();
+            let title_style = if is_done {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            ListItem::new(vec![
+                Line::from(vec![
                     Span::styled(pointer, Style::default().fg(Color::Magenta)),
-                    Span::styled(format!(" {} ", status_symbol(&issue.status)), Style::default().fg(status_color(&issue.status))),
-                    Span::styled(trunc(&issue.title, title_w.saturating_sub(3)), title_style),
+                    Span::styled(format!(" {}", trunc(&issue.title, title_w)), title_style),
+                ]),
+                Line::from(vec![
+                    Span::styled(
+                        format!("   #{} · {}sp  {}{}", issue.id, format_sp(issue.story_points), trunc(&issue.epic, 14), sub_badge),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                     Span::styled(due_str, Style::default().fg(
                         issue.due_date.map(|d| due_color(&d, is_done)).unwrap_or(Color::DarkGray)
                     )),
-                ]))
-            } else {
-                let (done_subs, total_subs) = app.subtask_counts(issue.id);
-                let sub_badge = if total_subs > 0 { format!("  [{}/{}]", done_subs, total_subs) } else { String::new() };
-                let due_str = issue.due_date.map(|d| format!("  {}", d.format("%b %d"))).unwrap_or_default();
-                let title_style = if is_done {
-                    Style::default().fg(Color::DarkGray)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(vec![
-                    Line::from(vec![
-                        Span::styled(pointer, Style::default().fg(Color::Magenta)),
-                        Span::styled(format!(" {}", trunc(&issue.title, title_w)), title_style),
-                    ]),
-                    Line::from(vec![
-                        Span::styled(
-                            format!("   #{} · {}sp  {}{}", issue.id, format_sp(issue.story_points), trunc(&issue.epic, 14), sub_badge),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::styled(due_str, Style::default().fg(
-                            issue.due_date.map(|d| due_color(&d, is_done)).unwrap_or(Color::DarkGray)
-                        )),
-                    ]),
-                ])
-            }
+                ]),
+            ])
         })
         .collect();
 
