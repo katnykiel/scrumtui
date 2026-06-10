@@ -6,7 +6,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Axis, Block, BorderType, Borders, Chart, Clear, Dataset, GraphType, List, ListItem,
-        Paragraph,
+        Paragraph, Wrap,
     },
     Frame,
 };
@@ -28,6 +28,7 @@ pub fn render(f: &mut Frame, popup: &Popup, app: &App) {
         }
         Popup::SprintManager(form) => render_sprint_form(f, form, app),
         Popup::ConfirmDelete(_, title) => render_confirm_delete(f, title),
+        Popup::ConfirmDeleteSprint(_, name) => render_confirm_delete_sprint(f, name),
         Popup::Trash { items, sel } => render_trash(f, items, *sel),
         Popup::Help => render_help(f),
         Popup::GanttEpicDetail { .. } => {} // handled separately in mod.rs
@@ -62,13 +63,17 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
     let visible_subtasks = form.subtasks.iter().filter(|s| !s.deleted).count();
     // header + each subtask row, minimum 3 rows so the section is always visible
     let subtask_section_height: u16 = (2 + visible_subtasks).max(3) as u16;
-    let base_height: u16 = 22;
+    // Description field gets more rows when focused so text wraps visibly
+    let desc_height: u16 = if form.focused_field == 5 { 5 } else { 3 };
+    let base_height: u16 = 19 + desc_height;
     let total_height = (base_height + subtask_section_height).min(f.area().height.saturating_sub(2));
     let area = centered_rect(72, total_height, f.area());
     f.render_widget(Clear, area);
 
     let bottom_hint = if form.in_subtask_list {
         " [j/k] nav  [e] edit  []/[ status  [x] del  [Ctrl+N] add  [Esc] back  [Enter] save "
+    } else if form.focused_field == 5 {
+        " [Tab] next field  [Enter] newline  [Ctrl+S / Esc→Enter] save  [Esc] cancel "
     } else {
         " [Tab] next field  [Enter] save  [Esc] cancel "
     };
@@ -103,14 +108,18 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
             Constraint::Length(3), // epic
             Constraint::Length(3), // status
             Constraint::Length(3), // due
-            Constraint::Length(3), // desc
+            Constraint::Length(desc_height), // desc (taller when focused)
             Constraint::Length(2), // error
             Constraint::Min(subtask_section_height), // subtasks
         ])
         .split(inner);
 
-    // For display, show the description on one line (collapse newlines)
-    let desc_display = form.description.replace('\n', "  ·  ");
+    // When description is focused show raw text (with newlines); otherwise show collapsed preview
+    let desc_display = if form.focused_field == 5 {
+        form.description.clone()
+    } else {
+        form.description.replace('\n', "  ·  ")
+    };
     let values: [String; 6] = [
         form.title.clone(),
         form.epic.clone(),
@@ -126,7 +135,7 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
         let label = FIELD_LABELS[i];
 
         let value_display = if i == 3 {
-            // Status: show cycling UI
+            // Status: show cycling UI with [ / ] keys (consistent with rest of UI)
             let prev = if form.status_idx > 0 {
                 Status::from_index(form.status_idx - 1).label()
             } else {
@@ -137,7 +146,7 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
             } else {
                 ""
             };
-            format!(" [h] {}  ◀  {}  ▶  [l] {}", prev, values[i], next)
+            format!(" [[]  {}  ◀  {}  ▶  {}  []]", prev, values[i], next)
         } else {
             let cursor = if is_focused { "▌" } else { "" };
             format!(" {}{}", values[i], cursor)
@@ -174,22 +183,51 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
             field_style
         };
 
-        f.render_widget(
-            Paragraph::new(vec![
+        if i == 5 {
+            // Description: multi-line with word wrap
+            let mut desc_lines: Vec<Line> = vec![
                 Line::from(Span::styled(format!(" {label}"), label_style)),
-                Line::from(Span::styled(&value_display[..], value_style)),
-            ])
-            .block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_style(if is_focused {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    }),
-            ),
-            field_areas[i],
-        );
+            ];
+            for (li, text_line) in value_display.split('\n').enumerate() {
+                let is_last = li == value_display.split('\n').count().saturating_sub(1);
+                let cursor = if is_focused && is_last { "▌" } else { "" };
+                desc_lines.push(Line::from(Span::styled(
+                    format!(" {}{}", text_line, cursor),
+                    value_style,
+                )));
+            }
+            f.render_widget(
+                Paragraph::new(desc_lines)
+                    .wrap(Wrap { trim: false })
+                    .block(
+                        Block::default()
+                            .borders(Borders::BOTTOM)
+                            .border_style(if is_focused {
+                                Style::default().fg(Color::Cyan)
+                            } else {
+                                Style::default().fg(Color::DarkGray)
+                            }),
+                    ),
+                field_areas[i],
+            );
+        } else {
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled(format!(" {label}"), label_style)),
+                    Line::from(Span::styled(&value_display[..], value_style)),
+                ])
+                .block(
+                    Block::default()
+                        .borders(Borders::BOTTOM)
+                        .border_style(if is_focused {
+                            Style::default().fg(Color::Cyan)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        }),
+                ),
+                field_areas[i],
+            );
+        }
     }
 
     if let Some(err) = &form.error {
@@ -875,6 +913,53 @@ fn render_confirm_delete(f: &mut Frame, title: &str) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+fn render_confirm_delete_sprint(f: &mut Frame, name: &str) {
+    let area = centered_rect(60, 8, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                "Delete Sprint",
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ]))
+        .border_style(Style::default().fg(Color::Red));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Delete: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                name,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "  Issues will be unlinked (not deleted).",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  [d] confirm    [n / Esc] cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 // ── Help ───────────────────────────────────────────────────────────────────────
 
 fn render_help(f: &mut Frame) {
@@ -951,6 +1036,7 @@ fn render_help(f: &mut Frame) {
         key("h / l", "Switch column"),
         key("j / k", "Navigate within column"),
         key("Tab", "Switch between parent / subtask panel"),
+        key("< / >", "Cycle through parents in subtask panel"),
         key("] / [", "Advance / regress status (follows issue)"),
         key("e  Enter", "Edit selected issue"),
         sep(),
@@ -961,10 +1047,12 @@ fn render_help(f: &mut Frame) {
         hdr("SPRINT HISTORY  (view 4)"),
         key("j / k", "Select sprint"),
         key("e  Enter", "Rename / edit sprint"),
+        key("d", "Delete sprint (unlinks issues)"),
         sep(),
         hdr("ISSUE FORM"),
         key("Tab / Shift-Tab", "Next / previous field"),
-        key("h / l  in Status", "Cycle status"),
+        key("] / [  in Status", "Advance / regress status"),
+        key("Ctrl+S", "Save from description field"),
         key("Space  in Active", "Toggle yes / no"),
         key("Enter", "Save  |  Esc  Cancel"),
         sep(),

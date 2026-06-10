@@ -193,6 +193,28 @@ fn main() -> Result<()> {
             return Ok(());
         }
 
+        // ── scrumtui init [--demo]
+        Some("init") => {
+            let demo = args.iter().any(|a| a == "--demo");
+            let db = Db::open(&db_path)?;
+            if demo {
+                if !db.is_empty()? {
+                    eprintln!("Database already has data. Delete {db_path} first to re-seed.");
+                    std::process::exit(1);
+                }
+                seed::seed(&db)?;
+                println!("Initialized {db_path} with demo data.");
+            } else {
+                println!("Initialized blank database at {db_path}.");
+            }
+            return Ok(());
+        }
+
+        Some("--version") | Some("-V") | Some("-v") => {
+            println!("scrumtui {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+
         Some("help") | Some("--help") | Some("-h") => {
             print_help();
             return Ok(());
@@ -201,11 +223,6 @@ fn main() -> Result<()> {
     }
 
     let db = Db::open(&db_path)?;
-
-    // Auto-seed if the database is empty
-    if db.is_empty()? {
-        seed::seed(&db)?;
-    }
 
     let mut app = App::new(db)?;
 
@@ -266,15 +283,18 @@ fn trunc_str(s: &str, max: usize) -> String {
 }
 
 fn print_help() {
-    println!("scrumtui — local terminal scrum board");
+    println!("scrumtui {} — local terminal scrum board", env!("CARGO_PKG_VERSION"));
     println!();
     println!("USAGE:");
     println!("  scrumtui                           open the TUI");
+    println!("  scrumtui init                      initialize a blank database");
+    println!("  scrumtui init --demo               initialize with demo/seed data");
     println!("  scrumtui add \"Title\" [flags]       create a new issue");
     println!("  scrumtui status <id> <todo|ip|done> change an issue's status");
     println!("  scrumtui list [flags]               list issues");
     println!("  scrumtui import <path.csv>          import Jira CSV");
     println!("  scrumtui export [output.md]         export to markdown");
+    println!("  scrumtui --version                  print version");
     println!();
     println!("ADD FLAGS:");
     println!("  -e, --epic <name>      epic label (default: general)");

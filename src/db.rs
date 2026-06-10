@@ -621,6 +621,16 @@ impl Db {
         Ok(())
     }
 
+    /// Delete a sprint and unlink all its issues (sets sprint_id = NULL).
+    pub fn delete_sprint(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE issues SET sprint_id = NULL WHERE sprint_id = ?1",
+            params![id],
+        )?;
+        self.conn.execute("DELETE FROM sprints WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     pub fn is_empty(&self) -> Result<bool> {
         let count: i64 =
             self.conn

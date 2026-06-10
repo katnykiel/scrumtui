@@ -80,7 +80,7 @@ fn render_sprint_list(f: &mut Frame, app: &App, area: Rect) {
                     Span::raw(" "),
                 ]))
                 .title_bottom(Line::from(Span::styled(
-                    " [j/k] navigate  [e] rename ",
+                    " [j/k] navigate  [e] rename  [d] delete ",
                     Style::default().fg(Color::DarkGray),
                 )))
                 .border_style(Style::default().fg(Color::Rgb(80, 80, 120))),

@@ -34,7 +34,7 @@ The sprint manager (opened with `S`) includes a live **burnup chart** showing id
 Requires [Rust](https://rustup.rs/) (stable, 1.75+). No system SQLite needed — it is bundled at compile time.
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/katnykiel/scrumtui
 cd scrumtui
 cargo build --release
 ./target/release/scrumtui

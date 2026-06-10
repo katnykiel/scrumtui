@@ -233,6 +233,7 @@ pub enum Popup {
     EditIssue(IssueForm),
     SprintManager(SprintForm),
     ConfirmDelete(i64, String), // (issue_id, issue_title)
+    ConfirmDeleteSprint(i64, String), // (sprint_id, sprint_name)
     Trash { items: Vec<Issue>, sel: usize },
     Help,
     /// Gantt epic detail: epic name, issues list, search query, scroll offset
@@ -296,6 +297,8 @@ pub struct App {
     pub kanban_panel: usize,
     /// Kanban: selected subtask row per column (subtask panel)
     pub kanban_sub_rows: [usize; 3],
+    /// Kanban: index into the list of parents-with-subtasks for the subtask panel
+    pub kanban_sub_parent_idx: usize,
     /// Gantt scroll offset (rows)
     pub gantt_scroll: usize,
     /// Gantt selected epic index (for Enter to open detail popup)
@@ -348,6 +351,7 @@ impl App {
             kanban_rows: [0, 0, 0],
             kanban_panel: 0,
             kanban_sub_rows: [0, 0, 0],
+            kanban_sub_parent_idx: 0,
             gantt_scroll: 0,
             gantt_sel: 0,
             popup: None,
@@ -644,32 +648,46 @@ impl App {
         self.issues.iter().find(|i| i.id == id)
     }
 
-    /// All subtasks whose parent is in the active sprint, by status.
-    /// Uses display_issues for stable kanban column membership.
-    pub fn sprint_subtasks_by_status(&self, status: &Status) -> Vec<Issue> {
+    /// All sprint parent issues that have at least one subtask, in order.
+    pub fn sprint_parents_with_subtasks(&self) -> Vec<Issue> {
         match &self.active_sprint {
             Some(s) => {
-                let sprint_parent_ids: std::collections::HashSet<i64> = self
+                let parents: Vec<Issue> = self
                     .display_issues
                     .iter()
                     .filter(|i| i.sprint_id == Some(s.id) && i.parent_id.is_none())
-                    .map(|i| i.id)
-                    .collect();
-                self.display_issues
-                    .iter()
-                    .filter(|i| {
-                        i.parent_id.is_some()
-                            && &i.status == status
-                            && i.parent_id
-                                .map(|pid| sprint_parent_ids.contains(&pid))
-                                .unwrap_or(false)
-                    })
                     .cloned()
+                    .collect();
+                parents
+                    .into_iter()
+                    .filter(|p| self.display_issues.iter().any(|i| i.parent_id == Some(p.id)))
                     .collect()
             }
             None => vec![],
         }
     }
+
+    /// The currently focused parent for the subtask panel (based on kanban_sub_parent_idx).
+    pub fn kanban_sub_parent(&self) -> Option<Issue> {
+        let parents = self.sprint_parents_with_subtasks();
+        let idx = self.kanban_sub_parent_idx.min(parents.len().saturating_sub(1));
+        parents.into_iter().nth(idx)
+    }
+
+    /// All subtasks of the currently focused sub-panel parent, by status.
+    pub fn sprint_subtasks_by_status(&self, status: &Status) -> Vec<Issue> {
+        match self.kanban_sub_parent() {
+            Some(parent) => self
+                .display_issues
+                .iter()
+                .filter(|i| i.parent_id == Some(parent.id) && &i.status == status)
+                .cloned()
+                .collect(),
+            None => vec![],
+        }
+    }
+
+
 
     /// Top-level sprint issues only (no subtasks), by status.
     pub fn sprint_parents_by_status(&self, status: &Status) -> Vec<Issue> {
@@ -1248,19 +1266,62 @@ impl App {
                 // Switch between parent and subtask panels (only if subtasks exist)
                 if self.sprint_has_any_subtasks() {
                     self.kanban_panel = 1 - self.kanban_panel;
-                    // Clamp the newly focused panel's row
-                    let col = self.kanban_col;
-                    let status = Status::from_index(col);
+                    // When entering the subtask panel, sync sub_parent_idx to the
+                    // currently selected parent (if it has subtasks).
                     if self.kanban_panel == 1 {
+                        if let Some(parent) = self.kanban_selected_parent() {
+                            let parents_with_subs = self.sprint_parents_with_subtasks();
+                            if let Some(pos) = parents_with_subs.iter().position(|p| p.id == parent.id) {
+                                self.kanban_sub_parent_idx = pos;
+                            }
+                        }
+                        // Clamp subtask row
+                        let col = self.kanban_col;
+                        let status = Status::from_index(col);
                         let len = self.sprint_subtasks_by_status(&status).len();
                         if self.kanban_sub_rows[col] >= len.max(1) {
                             self.kanban_sub_rows[col] = len.saturating_sub(1);
                         }
                     } else {
+                        let col = self.kanban_col;
+                        let status = Status::from_index(col);
                         let len = self.sprint_parents_by_status(&status).len();
                         if self.kanban_rows[col] >= len.max(1) {
                             self.kanban_rows[col] = len.saturating_sub(1);
                         }
+                    }
+                }
+            }
+            // Cycle through parents in the subtask panel with < and >
+            KeyCode::Char('<') | KeyCode::Char(',') => {
+                if self.kanban_panel == 1 {
+                    let len = self.sprint_parents_with_subtasks().len();
+                    if self.kanban_sub_parent_idx > 0 {
+                        self.kanban_sub_parent_idx -= 1;
+                    } else if len > 0 {
+                        self.kanban_sub_parent_idx = len - 1; // wrap around
+                    }
+                    // Clamp sub row
+                    let col = self.kanban_col;
+                    let status = Status::from_index(col);
+                    let sub_len = self.sprint_subtasks_by_status(&status).len();
+                    if self.kanban_sub_rows[col] >= sub_len.max(1) {
+                        self.kanban_sub_rows[col] = sub_len.saturating_sub(1);
+                    }
+                }
+            }
+            KeyCode::Char('>') | KeyCode::Char('.') => {
+                if self.kanban_panel == 1 {
+                    let len = self.sprint_parents_with_subtasks().len();
+                    if len > 0 {
+                        self.kanban_sub_parent_idx = (self.kanban_sub_parent_idx + 1) % len;
+                    }
+                    // Clamp sub row
+                    let col = self.kanban_col;
+                    let status = Status::from_index(col);
+                    let sub_len = self.sprint_subtasks_by_status(&status).len();
+                    if self.kanban_sub_rows[col] >= sub_len.max(1) {
+                        self.kanban_sub_rows[col] = sub_len.saturating_sub(1);
                     }
                 }
             }
@@ -1408,6 +1469,11 @@ impl App {
                     self.popup = Some(Popup::SprintManager(SprintForm::from_sprint(sprint)));
                 }
             }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                if let Some(sprint) = self.history_sprints.get(self.history_sel) {
+                    self.popup = Some(Popup::ConfirmDeleteSprint(sprint.id, sprint.name.clone()));
+                }
+            }
             _ => {}
         }
     }
@@ -1434,6 +1500,33 @@ impl App {
                             let _ = self.reload();
                             self.flush_display();
                             self.set_status("Issue moved to trash.");
+                        }
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        self.popup = None;
+                    }
+                    _ => {}
+                }
+            }
+
+            Some(Popup::ConfirmDeleteSprint(id, _)) => {
+                let id = *id;
+                match key.code {
+                    KeyCode::Char('d') | KeyCode::Char('D') => {
+                        self.popup = None;
+                        if let Err(e) = self.db.delete_sprint(id) {
+                            self.set_status(format!("Error: {e}"));
+                        } else {
+                            let _ = self.reload();
+                            self.flush_display();
+                            // Reload sprint history
+                            self.history_sprints = self.db.get_all_sprints().unwrap_or_default();
+                            self.history_sel = self.history_sel.min(self.history_sprints.len().saturating_sub(1));
+                            self.history_issues = Vec::new();
+                            if let Some(sprint) = self.history_sprints.get(self.history_sel) {
+                                self.history_issues = self.db.get_sprint_issues(sprint.id).unwrap_or_default();
+                            }
+                            self.set_status("Sprint deleted.");
                         }
                     }
                     KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -1553,6 +1646,33 @@ impl App {
             return self.handle_subtask_list_key(key);
         }
 
+        // Ctrl+S saves the form from any field (including description)
+        if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(err) = popup.validate() {
+                popup.error = Some(err);
+                return;
+            }
+            // Reuse Enter logic by temporarily pretending we pressed Enter without a dropdown open
+            let was_epic_open = popup.epic_dropdown_open;
+            let was_due_open = popup.due_date_dropdown_open;
+            popup.epic_dropdown_open = false;
+            popup.due_date_dropdown_open = false;
+            // save by synthesising a regular Enter key path — but popup.focused_field must not be 5
+            // so the newline guard doesn't fire. We'll temporarily set it to 0.
+            let saved_field = popup.focused_field;
+            popup.focused_field = 0;
+            self.handle_issue_form_key(crossterm::event::KeyEvent::new(
+                KeyCode::Enter, KeyModifiers::NONE,
+            ));
+            // Restore in case save was blocked by validation (popup still open)
+            if let Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) = &mut self.popup {
+                f.focused_field = saved_field;
+                f.epic_dropdown_open = was_epic_open;
+                f.due_date_dropdown_open = was_due_open;
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Esc => {
                 if popup.epic_dropdown_open {
@@ -1639,6 +1759,11 @@ impl App {
                 return;
             }
             KeyCode::Enter => {
+                // In description field, Enter inserts a newline instead of submitting
+                if popup.focused_field == 5 && !popup.epic_dropdown_open && !popup.due_date_dropdown_open {
+                    popup.description.push('\n');
+                    return;
+                }
                 // If dropdown open, commit selected epic and close instead of saving form
                 if popup.epic_dropdown_open {
                     let q = popup.epic.to_lowercase();
@@ -1819,14 +1944,14 @@ impl App {
         popup.error = None;
 
         if popup.focused_field == 3 {
-            // Status field: h/l to cycle
+            // Status field: [ / ] to cycle (consistent with rest of UI)
             match key.code {
-                KeyCode::Char('h') => {
+                KeyCode::Char('[') | KeyCode::Char('h') => {
                     if popup.status_idx > 0 {
                         popup.status_idx -= 1;
                     }
                 }
-                KeyCode::Char('l') => {
+                KeyCode::Char(']') | KeyCode::Char('l') => {
                     if popup.status_idx < 2 {
                         popup.status_idx += 1;
                     }

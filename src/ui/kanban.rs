@@ -23,6 +23,16 @@ fn due_color(due: &chrono::NaiveDate, done: bool) -> Color {
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let has_subs = app.sprint_has_any_subtasks();
 
+    let hint = if has_subs {
+        if app.kanban_panel == 1 {
+            " [h/l] col  [j/k] nav  [Tab] panel  [</>] parent  []/[] status  [e] edit  [?]help "
+        } else {
+            " [h/l] col  [j/k] nav  [Tab] sub-panel  []/[] status  [e] edit  [?]help "
+        }
+    } else {
+        " [h/l] col  [j/k] nav  []/[] status  [e] edit  [?]help "
+    };
+
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -32,11 +42,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             Span::raw(" "),
         ]))
         .title_bottom(Line::from(Span::styled(
-            if has_subs {
-                " [h/l] col  [j/k] nav  [Tab] panel  []/[] status  [e] edit  [?]help "
-            } else {
-                " [h/l] col  [j/k] nav  []/[] status  [e] edit  [?]help "
-            },
+            hint,
             Style::default().fg(Color::DarkGray),
         )))
         .border_style(Style::default().fg(Color::Rgb(80, 80, 120)));
@@ -54,7 +60,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let detail_area = v_chunks[1];
 
     if has_subs {
-        // Size subtask panel to fit its content, cap at half the board height
+        // Size subtask panel to fit its content (for focused parent), cap at half the board height
         let sub_max: usize = (0..3)
             .map(|c| app.sprint_subtasks_by_status(&Status::from_index(c)).len())
             .max()
@@ -127,14 +133,24 @@ fn render_column(
     let sp_str = if total_sp > 0.0 { format!("  {}sp", format_sp(total_sp)) } else { String::new() };
 
     let header_text = if is_sub_panel {
-        format!("  subtasks  {}{}", issues.len(), sp_str)
+        let parents = app.sprint_parents_with_subtasks();
+        let n = parents.len();
+        let idx = app.kanban_sub_parent_idx.min(n.saturating_sub(1));
+        let parent_name = parents.get(idx)
+            .map(|p| trunc(&p.title, area.width.saturating_sub(20) as usize))
+            .unwrap_or_default();
+        if n > 1 {
+            format!("  ◀ {}/{} ▶  {}  {}{}", idx + 1, n, parent_name, issues.len(), sp_str)
+        } else {
+            format!("  {}  {}{}", parent_name, issues.len(), sp_str)
+        }
     } else {
         format!("  {sym} {}  {}  {}{}", status.label(), "·", issues.len(), sp_str)
     };
     let header_style = if is_active_col {
         Style::default().fg(sc).add_modifier(Modifier::BOLD | Modifier::REVERSED)
     } else {
-        Style::default().fg(if is_sub_panel { Color::DarkGray } else { sc }).add_modifier(Modifier::BOLD)
+        Style::default().fg(if is_sub_panel { Color::Magenta } else { sc }).add_modifier(Modifier::BOLD)
     };
 
     f.render_widget(
