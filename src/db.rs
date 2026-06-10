@@ -111,7 +111,7 @@ impl Db {
              FROM issues
              WHERE deleted_at IS NULL
              ORDER BY (sprint_id IS NULL),
-                      rank DESC,
+                      created_at DESC,
                       id DESC",
         )?;
         let issues = stmt
@@ -525,7 +525,7 @@ impl Db {
                     sprint_id, created_at, updated_at, completed_at, parent_id, rank
              FROM issues
              WHERE sprint_id = ?1 AND parent_id IS NULL
-             ORDER BY rank DESC, id DESC",
+             ORDER BY created_at DESC, id DESC",
         )?;
         let issues = stmt.query_map(params![sprint_id], |row| {
             let status_str: String = row.get(4)?;
@@ -626,5 +626,64 @@ impl Db {
             self.conn
                 .query_row("SELECT COUNT(*) FROM issues", [], |r| r.get(0))?;
         Ok(count == 0)
+    }
+
+    /// Re-assign rank values for all top-level issues so that newer created_at
+    /// = higher rank, making them appear first in the `rank DESC` sort order.
+    /// Subtasks (parent_id IS NOT NULL) are left untouched — they don't use rank.
+    /// Call this after a bulk import to fix ordering.
+    pub fn rerank_by_created_at(&self) -> Result<()> {
+        // Collect ids ordered oldest-first so we can assign rank 1, 2, 3 ...
+        // (oldest gets the lowest rank; newest gets the highest → appears first
+        //  in ORDER BY rank DESC).
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM issues
+             WHERE parent_id IS NULL
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let ids: Vec<i64> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let tx = self.conn.unchecked_transaction()?;
+        for (rank, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE issues SET rank = ?1 WHERE id = ?2",
+                params![(rank as i64) + 1, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Create a sprint, but only if no sprint with the same name already exists.
+    /// Returns the id of the existing or newly-created sprint.
+    pub fn get_or_create_sprint(
+        &self,
+        name: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> Result<i64> {
+        let existing: Option<i64> = self.conn
+            .query_row(
+                "SELECT id FROM sprints WHERE name = ?1 LIMIT 1",
+                params![name],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+        self.conn.execute(
+            "INSERT INTO sprints (name, start_date, end_date, is_active, created_at)
+             VALUES (?1, ?2, ?3, 0, ?4)",
+            params![
+                name,
+                start_date.format("%Y-%m-%d").to_string(),
+                end_date.format("%Y-%m-%d").to_string(),
+                now_str(),
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
     }
 }

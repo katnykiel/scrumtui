@@ -7,6 +7,8 @@ mod seed;
 mod ui;
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -39,8 +41,8 @@ fn main() -> Result<()> {
             println!("Importing from {csv_path} → {db_path}");
             let report = import::import_jira_csv(&db, csv_path)?;
             println!(
-                "Done.  {} issues imported,  {} subtasks imported,  {} rows skipped.",
-                report.imported, report.subtasks_imported, report.skipped
+                "Done.  {} issues,  {} subtasks,  {} sprints created,  {} rows skipped.",
+                report.imported, report.subtasks_imported, report.sprints_created, report.skipped
             );
             return Ok(());
         }
@@ -217,7 +219,30 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = run_app(&mut terminal, &mut app);
+    // Install a panic hook that restores the terminal before printing the
+    // panic message, so the shell is never left in raw/alternate-screen mode.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        default_hook(info);
+    }));
+
+    // Register a quit flag that is set by SIGTERM, SIGHUP, or SIGINT.
+    // SIGHUP fires when the terminal window is closed.
+    // SIGINT fires for Ctrl-C at the OS level (crossterm also handles it as a
+    // key event, but we want the signal path too).
+    let quit_flag = Arc::new(AtomicBool::new(false));
+    for sig in [
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGHUP,
+        signal_hook::consts::SIGINT,
+    ] {
+        signal_hook::flag::register(sig, Arc::clone(&quit_flag))
+            .expect("failed to register signal handler");
+    }
+
+    let res = run_app(&mut terminal, &mut app, quit_flag);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -267,36 +292,54 @@ fn print_help() {
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
+    quit_flag: Arc<AtomicBool>,
 ) -> Result<()> {
     // Draw once on startup
     terminal.draw(|f| ui::render(f, app))?;
 
     loop {
-        // If a status message is active, poll with a short timeout so it can
-        // expire and be cleared from the screen.  Otherwise block indefinitely
-        // — no CPU consumed while the user is idle.
+        // Exit immediately if a signal was received.
+        if quit_flag.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // Block indefinitely when idle so we use zero CPU.
+        // Use a short timeout only while a status message is on screen
+        // (so it can expire and be erased).
         let timeout = if app.current_status().is_some() {
             Duration::from_millis(250)
         } else {
-            Duration::from_secs(3600) // effectively infinite
+            Duration::from_secs(3600)
         };
 
-        let had_event = event::poll(timeout)?;
+        let had_event = match event::poll(timeout) {
+            Ok(v) => v,
+            // poll() returns Err when stdin is closed / terminal detached.
+            // Exit cleanly instead of spinning.
+            Err(_) => break,
+        };
+
+        // Check signal flag again after waking.
+        if quit_flag.load(Ordering::Relaxed) {
+            break;
+        }
 
         if had_event {
-            match event::read()? {
+            let ev = match event::read() {
+                Ok(e) => e,
+                Err(_) => break, // stdin closed
+            };
+            match ev {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if app.handle_key(key) {
                         break;
                     }
                 }
-                Event::Resize(_, _) => {
-                    // Terminal was resized — redraw unconditionally below
-                }
-                _ => continue, // mouse / focus events: ignore, don't redraw
+                Event::Resize(_, _) => {} // fall through to redraw
+                _ => continue,            // focus / mouse: skip redraw
             }
         }
-        // Redraw after every key press, resize, or status-message timeout tick
+
         terminal.draw(|f| ui::render(f, app))?;
     }
     Ok(())

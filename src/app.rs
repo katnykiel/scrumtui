@@ -644,20 +644,6 @@ impl App {
         self.issues.iter().find(|i| i.id == id)
     }
 
-    /// The issue currently selected in the kanban view (if any).
-    pub fn selected_kanban_issue(&self) -> Option<Issue> {
-        let col = self.kanban_col;
-        let status = match col {
-            0 => &crate::models::Status::Todo,
-            1 => &crate::models::Status::InProgress,
-            2 => &crate::models::Status::Done,
-            _ => return None,
-        };
-        let issues = self.sprint_issues_by_status(status);
-        let row = self.kanban_rows[col];
-        issues.get(row).cloned()
-    }
-
     /// All subtasks whose parent is in the active sprint, by status.
     /// Uses display_issues for stable kanban column membership.
     pub fn sprint_subtasks_by_status(&self, status: &Status) -> Vec<Issue> {
@@ -683,22 +669,6 @@ impl App {
             }
             None => vec![],
         }
-    }
-
-    /// Sprint issues by status for kanban — top-level issues + subtasks whose parent is in sprint.
-    /// Uses display_issues for stable column membership and ordering.
-    pub fn sprint_issues_by_status(&self, status: &Status) -> Vec<Issue> {
-        let mut items = match &self.active_sprint {
-            Some(s) => self
-                .display_issues
-                .iter()
-                .filter(|i| i.sprint_id == Some(s.id) && &i.status == status && i.parent_id.is_none())
-                .cloned()
-                .collect::<Vec<_>>(),
-            None => vec![],
-        };
-        items.extend(self.sprint_subtasks_by_status(status));
-        items
     }
 
     /// Top-level sprint issues only (no subtasks), by status.

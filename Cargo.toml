@@ -14,3 +14,4 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = "0.4"
 anyhow = "1"
 csv = "1"
+signal-hook = "0.4.4"
