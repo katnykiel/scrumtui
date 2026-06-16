@@ -75,7 +75,7 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
     } else if form.status_dropdown_open {
         " [j/k] select  [Enter] confirm  [Esc] close "
     } else if form.focused_field == 5 {
-        " [Tab] next field  [Enter] newline  [Ctrl+S] save  [Esc] cancel "
+        " [Tab] next field  [Enter] save  [Esc] cancel "
     } else {
         " [Tab] next field  [Enter] save  [Esc] cancel "
     };
@@ -1007,7 +1007,7 @@ fn render_confirm_delete_sprint(f: &mut Frame, name: &str) {
 // ── Help ───────────────────────────────────────────────────────────────────────
 
 fn render_help(f: &mut Frame) {
-    let area = centered_rect(66, 52, f.area());
+    let area = centered_rect(62, 32, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -1035,7 +1035,7 @@ fn render_help(f: &mut Frame) {
     let key = |k: &'static str, desc: &'static str| -> Line<'static> {
         Line::from(vec![
             Span::styled(
-                format!("  {k:<24}"),
+                format!("  {k:<22}"),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -1056,64 +1056,32 @@ fn render_help(f: &mut Frame) {
     let lines = vec![
         sep(),
         hdr("GLOBAL"),
-        key("1 / 2 / 3 / 4", "Backlog / Kanban / Gantt / Sprint history"),
-        key("q  Ctrl-C", "Quit"),
-        key("?", "Toggle help"),
-        key("u  Ctrl-Z", "Undo (up to 50 steps)"),
-        sep(),
-        hdr("BACKLOG  (view 1)"),
-        key("j / k", "Navigate issues"),
-        key("g / G", "Jump to first / last issue"),
-        key("Ctrl-D / Ctrl-U", "Jump down / up 10 items"),
-        key("Ctrl-j / Ctrl-k", "Move issue down / up in rank"),
-        key("/", "Search / filter"),
-        key("c", "Toggle show completed"),
+        key("j / k", "Navigate up / down"),
         key("] / [", "Advance / regress status"),
+        key("Tab", "Next field or panel"),
+        key("e  Enter", "Edit / confirm"),
+        key("Esc", "Cancel / back"),
+        key("1 / 2 / 3 / 4", "Backlog / Kanban / Gantt / History"),
+        key("q  /  u  /  ?", "Quit  /  Undo  /  Help"),
+        sep(),
+        hdr("BACKLOG"),
         key("n", "New issue"),
-        key("e  Enter", "Edit selected issue"),
-        key("d", "Move to trash"),
-        key("T", "Open trash (restore / purge)"),
-        key("s", "Toggle sprint membership"),
-        key("S", "Open sprint manager"),
+        key("d  /  T", "Trash issue  /  open trash"),
+        key("s  /  S", "Toggle sprint  /  sprint manager"),
+        key("c", "Toggle show completed"),
+        key("/", "Search"),
+        key("Ctrl-j / Ctrl-k", "Reorder (rank)"),
         sep(),
-        hdr("KANBAN  (view 2)"),
+        hdr("KANBAN"),
         key("h / l", "Switch column"),
-        key("j / k", "Navigate within column"),
-        key("Tab", "Switch between parent / subtask panel"),
-        key("< / >", "Cycle through parents in subtask panel"),
-        key("] / [", "Advance / regress status (follows issue)"),
-        key("e  Enter", "Edit selected issue"),
+        key("Tab", "Parent ↔ subtask panel"),
+        key("< / >", "Cycle parent in subtask panel"),
         sep(),
-        hdr("GANTT  (view 3)"),
-        key("j / k", "Navigate epics"),
-        key("Enter / e", "Open epic detail (issues + counts)"),
-        sep(),
-        hdr("SPRINT HISTORY  (view 4)"),
-        key("j / k", "Select sprint"),
-        key("e  Enter", "Rename / edit sprint"),
-        key("d", "Delete sprint (unlinks issues)"),
-        sep(),
-        hdr("ISSUE FORM"),
+        hdr("FORMS"),
         key("Tab / Shift-Tab", "Next / previous field"),
-        key("Enter / Space  in Status", "Open status dropdown"),
-        key("j / k  in Status", "Navigate dropdown"),
-        key("Ctrl+S", "Save from description field"),
-        key("Space  in Active", "Toggle yes / no"),
-        key("Enter", "Save  |  Esc  Cancel"),
-        sep(),
-        hdr("SUBTASKS  (in issue form)"),
-        key("Tab", "Focus subtask list"),
-        key("j / k", "Navigate"),
-        key("e / i", "Edit title"),
-        key("] / [", "Advance / regress status"),
-        key("x", "Remove (on save)"),
-        key("Ctrl-N", "Add new subtask"),
-        key("Esc", "Back to form fields"),
-        sep(),
-        hdr("TRASH"),
-        key("j / k", "Navigate"),
-        key("r", "Restore  |  D  Delete permanently"),
-        key("Esc", "Close"),
+        key("Ctrl-N", "Add subtask"),
+        key("x", "Remove subtask"),
+        key("Ctrl-S", "Save from any field"),
     ];
 
     f.render_widget(Paragraph::new(lines), inner);

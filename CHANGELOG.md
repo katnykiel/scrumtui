@@ -21,6 +21,9 @@ First stable release. All core features are present and working: backlog, kanban
 - Kanban cards: all titles bold regardless of status; done cards use `Gray + Bold`
 - Status badges no longer bold in the issue list
 - Sprint form now defaults to the Monday–Sunday week containing today instead of an arbitrary 4-day window
+- Help overlay condensed: Universal and Global sections merged, redundant per-view navigation entries removed, popup height reduced
+- README condensed to roughly half the length
+- Issue form: Enter now saves from the description field instead of inserting a newline
 
 ---
 

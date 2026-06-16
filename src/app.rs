@@ -1813,11 +1813,6 @@ impl App {
                 return;
             }
             KeyCode::Enter => {
-                // In description field, Enter inserts a newline instead of submitting
-                if popup.focused_field == 5 && !popup.epic_dropdown_open && !popup.due_date_dropdown_open {
-                    popup.description.push('\n');
-                    return;
-                }
                 // If dropdown open, commit selected epic and close instead of saving form
                 if popup.epic_dropdown_open {
                     let q = popup.epic.to_lowercase();
