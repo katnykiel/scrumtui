@@ -45,12 +45,11 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             hint,
             Style::default().fg(Color::DarkGray),
         )))
-        .border_style(Style::default().fg(Color::Rgb(80, 80, 120)));
+        .border_style(Style::default().fg(Color::Rgb(100, 100, 160)));
 
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
-    // Vertical split: kanban board on top, detail pane on bottom (4 rows)
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(6), Constraint::Length(4)])
@@ -60,9 +59,8 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let detail_area = v_chunks[1];
 
     if has_subs {
-        // Subtask bar height: enough for all subtasks of focused parent + 2 for header border
         let sub_count = app.sprint_subtasks_flat().len();
-        let sub_h = ((sub_count + 2) as u16).max(3).min(board_area.height / 2);
+        let sub_h = ((sub_count + 2) as u16).max(4).min(board_area.height / 2);
         let parent_h = board_area.height.saturating_sub(sub_h);
 
         let panels = Layout::default()
@@ -70,18 +68,17 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             .constraints([Constraint::Length(parent_h), Constraint::Length(sub_h)])
             .split(board_area);
 
-        render_board(f, app, panels[0], false);
-        render_subtask_bar(f, app, panels[1]);
+        render_board(f, app, panels[0]);
+        render_subtask_panel(f, app, panels[1]);
     } else {
-        render_board(f, app, board_area, false);
+        render_board(f, app, board_area);
     }
 
     render_detail(f, app, detail_area);
 }
 
-fn render_board(f: &mut Frame, app: &mut App, area: Rect, is_sub_panel: bool) {
-    let panel_focused = if is_sub_panel { app.kanban_panel == 1 } else { app.kanban_panel == 0 };
-
+fn render_board(f: &mut Frame, app: &mut App, area: Rect) {
+    let panel_focused = app.kanban_panel == 0;
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(1, 3), Constraint::Ratio(1, 3)])
@@ -92,37 +89,35 @@ fn render_board(f: &mut Frame, app: &mut App, area: Rect, is_sub_panel: bool) {
     }
 }
 
-fn render_subtask_bar(f: &mut Frame, app: &mut App, area: Rect) {
+/// Stacked vertical list of subtasks for the focused parent.
+fn render_subtask_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let is_focused = app.kanban_panel == 1;
     let parents = app.sprint_parents_with_subtasks();
     let n = parents.len();
     let idx = app.kanban_sub_parent_idx.min(n.saturating_sub(1));
     let parent_name = parents.get(idx)
-        .map(|p| p.title.as_str())
-        .unwrap_or("");
+        .map(|p| p.title.clone())
+        .unwrap_or_default();
 
-    let border_color = if is_focused { Color::Magenta } else { Color::Rgb(60, 60, 90) };
+    let border_color = if is_focused { Color::Magenta } else { Color::Rgb(90, 90, 140) };
     let title_style = if is_focused {
         Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
 
-    let cycle_hint = if n > 1 {
-        format!(" [</>]  {} / {}  {} ", idx + 1, n, parent_name)
+    let parent_label = if n > 1 {
+        format!(" subtasks — {} ({}/{}) ", parent_name, idx + 1, n)
     } else {
-        format!("  {} ", parent_name)
+        format!(" subtasks — {} ", parent_name)
     };
+    let cycle_hint = if n > 1 { " [</>] cycle parent " } else { "" };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled("subtasks", title_style),
-            Span::raw(" "),
-        ]))
+        .title(Line::from(Span::styled(parent_label, title_style)))
         .title_bottom(Line::from(Span::styled(
             cycle_hint,
             Style::default().fg(Color::DarkGray),
@@ -133,29 +128,38 @@ fn render_subtask_bar(f: &mut Frame, app: &mut App, area: Rect) {
 
     let subtasks = app.sprint_subtasks_flat();
     let sel_row = app.kanban_sub_rows[0];
-    let w = inner.width as usize;
+    let col_w = inner.width as usize;
 
-    let items: Vec<ListItem> = subtasks.iter().enumerate().map(|(row, issue)| {
-        let is_sel = is_focused && row == sel_row;
+    let items: Vec<ListItem> = subtasks.iter().enumerate().map(|(flat_row, issue)| {
+        let is_sel = is_focused && flat_row == sel_row;
         let pointer = if is_sel { "▶" } else { " " };
         let is_done = issue.status == Status::Done;
-        let title_style = if is_done {
-            Style::default().fg(Color::DarkGray)
-        } else if is_sel {
-            Style::default().fg(Color::White)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        let sym = status_symbol(&issue.status);
         let sc = status_color(&issue.status);
+        let sym = status_symbol(&issue.status);
+        let status_badge = format!("[{}]", issue.status.short().trim());
+
+        // Subtasks: terminal default fg for active (no bold — subtler than parents), DarkGray for done.
+        let title_style = if is_done {
+            Style::default().fg(Color::Gray)
+        } else {
+            Style::default()
+        };
+
         let due_str = issue.due_date
-            .map(|d| format!("  {}", d.format("%b %d")))
+            .map(|d| format!(" {}", d.format("%b %d")))
             .unwrap_or_default();
-        let title_max = w.saturating_sub(6 + due_str.len());
+        let badge_w = status_badge.len() + 1 + due_str.len();
+        let title_max = col_w.saturating_sub(4 + badge_w);
+
         ListItem::new(Line::from(vec![
-            Span::styled(format!(" {pointer} "), Style::default().fg(Color::Magenta)),
+            Span::styled(format!("{pointer} "), Style::default().fg(Color::Magenta)),
             Span::styled(format!("{sym} "), Style::default().fg(sc)),
-            Span::styled(trunc(&issue.title, title_max), title_style),
+            Span::styled(
+                format!("{:<width$}", trunc(&issue.title, title_max), width = title_max),
+                title_style,
+            ),
+            Span::raw(" "),
+            Span::styled(status_badge, Style::default().fg(sc)),
             Span::styled(due_str, Style::default().fg(
                 issue.due_date.map(|d| due_color(&d, is_done)).unwrap_or(Color::DarkGray)
             )),
@@ -182,12 +186,9 @@ fn render_column(
 ) {
     let is_active_col = app.kanban_col == col_idx && panel_focused;
     let sc = status_color(status);
-
     let issues: Vec<Issue> = app.sprint_parents_by_status(status);
     let selected_row = app.kanban_rows[col_idx];
-
-    // Active col in focused panel uses the status color; everything else is dim purple
-    let border_color = if is_active_col { sc } else { Color::Rgb(60, 60, 90) };
+    let border_color = if is_active_col { sc } else { Color::Rgb(90, 90, 140) };
 
     let col_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -227,10 +228,16 @@ fn render_column(
             let (done_subs, total_subs) = app.subtask_counts(issue.id);
             let sub_badge = if total_subs > 0 { format!("  [{}/{}]", done_subs, total_subs) } else { String::new() };
             let due_str = issue.due_date.map(|d| format!("  {}", d.format("%b %d"))).unwrap_or_default();
-            let title_style = if is_done {
-                Style::default().fg(Color::DarkGray)
+            let carry_badge = if issue.carry_count > 0 {
+                format!("  ↩{}", issue.carry_count)
             } else {
-                Style::default()
+                String::new()
+            };
+            // All kanban cards are bold; done cards are faded (DarkGray) but still bold.
+            let title_style = if is_done {
+                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().add_modifier(Modifier::BOLD)
             };
             ListItem::new(vec![
                 Line::from(vec![
@@ -242,6 +249,7 @@ fn render_column(
                         format!("   #{} · {}sp  {}{}", issue.id, format_sp(issue.story_points), trunc(&issue.epic, 14), sub_badge),
                         Style::default().fg(Color::DarkGray),
                     ),
+                    Span::styled(carry_badge, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
                     Span::styled(due_str, Style::default().fg(
                         issue.due_date.map(|d| due_color(&d, is_done)).unwrap_or(Color::DarkGray)
                     )),
@@ -269,7 +277,7 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Rgb(60, 60, 90)))
+        .border_style(Style::default().fg(Color::Rgb(90, 90, 140)))
         .title(Span::styled(" detail ", Style::default().fg(Color::DarkGray)));
 
     let Some(issue) = app.kanban_selected_issue() else {
@@ -294,6 +302,12 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
         .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "—".into());
 
+    let carry_str = if issue.carry_count > 0 {
+        format!("  ↩{} carried", issue.carry_count)
+    } else {
+        String::new()
+    };
+
     let mut lines = vec![
         Line::from(vec![
             Span::styled(format!("  {sym} "), Style::default().fg(sc)),
@@ -305,23 +319,24 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
                 format!("   #{} · {}sp · {} · {}", issue.id, format_sp(issue.story_points), issue.status.label(), issue.epic),
                 Style::default().fg(Color::DarkGray),
             ),
+            Span::styled(carry_str, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         ]),
     ];
     if !desc.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("         ", Style::default()),
-            Span::styled(desc, Style::default().fg(Color::Gray)),
+            Span::styled(desc, Style::default().fg(Color::DarkGray)),
         ]));
     }
     lines.push(Line::from(vec![
         Span::styled("  due ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{:<12}", due_str), Style::default().fg(Color::Yellow)),
         Span::styled("  created ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{:<17}", created), Style::default().fg(Color::Gray)),
+        Span::styled(format!("{:<17}", created), Style::default().fg(Color::DarkGray)),
         Span::styled("  updated ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{:<17}", updated), Style::default().fg(Color::Gray)),
+        Span::styled(format!("{:<17}", updated), Style::default().fg(Color::DarkGray)),
         Span::styled("  done ", Style::default().fg(Color::DarkGray)),
-        Span::styled(completed, Style::default().fg(Color::Gray)),
+        Span::styled(completed, Style::default().fg(Color::DarkGray)),
     ]));
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);

@@ -181,12 +181,16 @@ pub struct SprintForm {
 impl SprintForm {
     pub fn new() -> Self {
         let today = Local::now().date_naive();
-        let end = today + chrono::Duration::days(4);
+        // Default to a full Monday–Sunday week containing today.
+        use chrono::Datelike;
+        let days_from_monday = today.weekday().num_days_from_monday();
+        let monday = today - chrono::Duration::days(days_from_monday as i64);
+        let sunday = monday + chrono::Duration::days(6);
         SprintForm {
             editing_id: None,
             name: String::from("Sprint"),
-            start_date: today.format("%Y-%m-%d").to_string(),
-            end_date: end.format("%Y-%m-%d").to_string(),
+            start_date: monday.format("%Y-%m-%d").to_string(),
+            end_date: sunday.format("%Y-%m-%d").to_string(),
             is_active: true,
             focused_field: 0,
             error: None,
@@ -333,6 +337,9 @@ pub struct App {
     pub pending_kanban_follow: Option<(i64, usize)>,
     /// Cached sorted unique epic names — refreshed on reload().
     epics_cache: Vec<String>,
+    /// Issue IDs that were just marked Done in the backlog this session.
+    /// These are kept visible until flush_display() is called (i.e., view switch).
+    recently_completed: std::collections::HashSet<i64>,
 }
 
 impl App {
@@ -374,6 +381,7 @@ impl App {
             undo_stack: Vec::new(),
             pending_kanban_follow: None,
             epics_cache,
+            recently_completed: std::collections::HashSet::new(),
         })
     }
 
@@ -407,6 +415,7 @@ impl App {
     /// so that order/visibility changes take effect when leaving a view.
     pub fn flush_display(&mut self) {
         self.display_issues = self.issues.clone();
+        self.recently_completed.clear();
     }
 
     /// Patch the status (and completed_at) of an issue in display_issues without
@@ -421,6 +430,11 @@ impl App {
                 None
             };
             entry.status = new_status.clone();
+        }
+        if new_status == &Status::Done {
+            self.recently_completed.insert(issue_id);
+        } else {
+            self.recently_completed.remove(&issue_id);
         }
     }
 
@@ -622,7 +636,7 @@ impl App {
                 !in_sprint && i.parent_id.is_none()
             })
             .filter(|i| {
-                if !self.show_completed && i.status == Status::Done { return false; }
+                if !self.show_completed && i.status == Status::Done && !self.recently_completed.contains(&i.id) { return false; }
                 search_matches(i)
             })
             .cloned()
@@ -2327,6 +2341,17 @@ impl App {
                 let active = popup.is_active;
 
                 self.popup = None;
+
+                // If activating a new sprint, bump carry_count for the old sprint's
+                // incomplete issues before we deactivate it.
+                if active {
+                    if let Some(ref old_sprint) = self.active_sprint {
+                        // Don't bump for the sprint being edited (it's staying active)
+                        if editing_id != Some(old_sprint.id) {
+                            let _ = self.db.bump_carry_count_for_sprint(old_sprint.id);
+                        }
+                    }
+                }
 
                 let result = if let Some(id) = editing_id {
                     self.db.update_sprint(id, &name, start, end, active)

@@ -2,6 +2,8 @@
 
 A minimal, local, terminal-based scrum system driven by keyboard shortcuts. I use scrum every day to manage my research, and got sick of the existing scrum systems, so I vibe-coded this TUI to fit my needs. Maybe you'll find it useful too!
 
+**Version 1.0.0**
+
 ---
 
 > **⚠ AI-GENERATED CODE DISCLAIMER**
@@ -14,7 +16,7 @@ A minimal, local, terminal-based scrum system driven by keyboard shortcuts. I us
 
 ## What it is
 
-`scrumtui` is a lightweight personal scrum system that lives entirely on your machine. There is no server, no account, no browser. Everything is stored in a single SQLite file at `~/.scrumtui.db`. The UI runs in your terminal using [ratatui](https://github.com/ratatui-org/ratatui).
+`scrumtui` is a lightweight personal scrum system that lives entirely on your machine. There is no server, no account, no browser. Everything is stored in a single SQLite file (default `~/.scrumtui.db`). The UI runs in your terminal using [ratatui](https://github.com/ratatui-org/ratatui).
 
 It has four views:
 
@@ -78,15 +80,21 @@ On the very first run, the database is empty and **sample data is loaded automat
 
 The sprint is shown at the top with a box around it. Issues below the sprint box are in the backlog. Subtasks are shown indented beneath their parent issue.
 
+When you mark an issue as Done using `>` or `.`, it stays visible in the backlog until you switch views — it will disappear on your next return to the backlog. This prevents accidental loss of context while working through a list.
+
 ### Kanban view
 
 | Key | Action |
 |-----|--------|
 | `h` / `l` or `←` / `→` | Switch between TODO / IN PROGRESS / DONE columns |
 | `j` / `k` | Move selection up / down within a column |
+| `Tab` | Toggle between the parent issues panel and subtask panel (when subtasks exist) |
+| `<` / `>` | Cycle between parents in the subtask panel |
 | `>` or `.` | Advance the selected issue to the next status |
 | `<` or `,` | Regress the selected issue to the previous status |
 | `e` or `Enter` | Edit the selected issue |
+
+When any sprint issue has subtasks, the kanban board splits into two sections: the main three-column board for parent issues (top), and a subtask panel (bottom) showing a stacked vertical list of the current parent's subtasks with status badges inline. Press `Tab` to focus the subtask panel and navigate subtasks directly.
 
 ### Gantt view
 
@@ -139,11 +147,28 @@ When you press `d` on an issue, a confirmation popup appears. Press `d` again to
 
 Press `4` to open the sprint history. The left panel lists all sprints (active sprint marked with `●`). Use `j`/`k` to move between sprints. The right panel shows the selected sprint's issues, completion stats, and duration.
 
+When you activate a new sprint via the sprint manager (`S`), any TODO or IN PROGRESS issues from the previous sprint have their carry-over count incremented. These appear with an orange `↩N` badge in the backlog and kanban, surfacing them as higher priority for the new week.
+
+---
+
+## Database path
+
+The database location is resolved in this order:
+
+| Method | Example |
+|--------|---------|
+| `--db` flag | `scrumtui --db ~/work/research.db` |
+| `SCRUMTUI_DB` env var | `export SCRUMTUI_DB=~/work/research.db` |
+| Config file | `~/.config/scrumtui/config` → `db_path = ~/work/research.db` |
+| Default | `~/.scrumtui.db` |
+
+The `--db` flag works with all subcommands: `scrumtui --db ~/work/research.db list`.
+
 ---
 
 ## CLI
 
-All commands operate on `~/.scrumtui.db` directly without opening the TUI.
+All commands operate on the resolved database path without opening the TUI.
 
 ```bash
 # Create a new issue
@@ -203,10 +228,22 @@ All changes are written to the SQLite database immediately on save.
 
 ## Data
 
-- **Database**: `~/.scrumtui.db` (SQLite, auto-created on first run)
+- **Database**: `~/.scrumtui.db` by default (SQLite, auto-created on first run); see [Database path](#database-path) for alternatives
 - **Tables**: `issues`, `sprints`, `settings`
 - Each issue records `created_at`, `updated_at`, and `completed_at` (set automatically when status becomes DONE)
 - The burnup chart in the sprint manager uses `completed_at` to compute actual daily progress
+
+---
+
+## Jira CSV import
+
+The importer handles Jira's default CSV export format. Stories, Tasks, and Bugs with an Epic parent are imported as top-level issues; Subtasks are linked to their parent. Sprint membership and date ranges are inferred from each record's created/resolved timestamps.
+
+After import, each issue's due date is set to the end date of its sprint. This avoids confusing short date ranges from Jira's default per-issue due dates.
+
+```bash
+scrumtui import export.csv
+```
 
 ---
 

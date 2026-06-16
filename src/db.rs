@@ -69,6 +69,9 @@ impl Db {
         let _ = self.conn.execute_batch(
             "UPDATE issues SET rank = id WHERE rank = 0;",
         );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE issues ADD COLUMN carry_count INTEGER NOT NULL DEFAULT 0;",
+        );
         // Settings table for persisting UI preferences
         let _ = self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS settings (
@@ -107,7 +110,7 @@ impl Db {
     pub fn get_all_issues(&self) -> Result<Vec<Issue>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at, parent_id, rank
+                    sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count
              FROM issues
              WHERE deleted_at IS NULL
              ORDER BY (sprint_id IS NULL),
@@ -135,6 +138,7 @@ impl Db {
                     completed_at: completed_str.as_deref().map(parse_dt),
                     parent_id: row.get(11)?,
                     rank: row.get(12)?,
+                    carry_count: row.get(13).unwrap_or(0),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -144,7 +148,7 @@ impl Db {
     pub fn get_issue(&self, id: i64) -> Result<Issue> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at, parent_id, rank
+                    sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count
              FROM issues WHERE id = ?1",
         )?;
         let issue = stmt.query_row(params![id], |row| {
@@ -167,6 +171,7 @@ impl Db {
                 completed_at: completed_str.as_deref().map(parse_dt),
                 parent_id: row.get(11)?,
                 rank: row.get(12)?,
+                carry_count: row.get(13).unwrap_or(0),
             })
         })?;
         Ok(issue)
@@ -293,7 +298,7 @@ impl Db {
     pub fn get_trash(&self) -> Result<Vec<Issue>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at, parent_id, rank
+                    sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count
              FROM issues
              WHERE deleted_at IS NOT NULL AND parent_id IS NULL
              ORDER BY deleted_at DESC",
@@ -319,6 +324,7 @@ impl Db {
                     completed_at: completed_str.as_deref().map(parse_dt),
                     parent_id: row.get(11)?,
                     rank: row.get(12)?,
+                    carry_count: row.get(13).unwrap_or(0),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -464,6 +470,15 @@ impl Db {
         Ok(())
     }
 
+    pub fn set_issue_due_date(&self, issue_id: i64, due_date: NaiveDate) -> Result<()> {
+        let due_str = due_date.format("%Y-%m-%d").to_string();
+        self.conn.execute(
+            "UPDATE issues SET due_date=?1 WHERE id=?2",
+            params![due_str, issue_id],
+        )?;
+        Ok(())
+    }
+
     pub fn set_issue_sprint(&self, issue_id: i64, sprint_id: Option<i64>) -> Result<()> {
         self.conn.execute(
             "UPDATE issues SET sprint_id=?1, updated_at=?2 WHERE id=?3",
@@ -522,7 +537,7 @@ impl Db {
     pub fn get_sprint_issues(&self, sprint_id: i64) -> Result<Vec<Issue>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at, parent_id, rank
+                    sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count
              FROM issues
              WHERE sprint_id = ?1 AND parent_id IS NULL
              ORDER BY created_at DESC, id DESC",
@@ -545,9 +560,21 @@ impl Db {
                 completed_at: completed_str.as_deref().map(parse_dt),
                 parent_id: row.get(11)?,
                 rank: row.get(12)?,
+                carry_count: row.get(13).unwrap_or(0),
             })
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(issues)
+    }
+
+    /// Increment carry_count for all TODO/IN_PROGRESS issues in a sprint.
+    /// Call this when completing a sprint / activating a new one.
+    pub fn bump_carry_count_for_sprint(&self, sprint_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE issues SET carry_count = carry_count + 1
+             WHERE sprint_id = ?1 AND status IN ('TODO', 'IN_PROGRESS') AND deleted_at IS NULL",
+            params![sprint_id],
+        )?;
+        Ok(())
     }
 
     pub fn get_active_sprint(&self) -> Result<Option<Sprint>> {

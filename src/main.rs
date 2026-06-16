@@ -23,14 +23,72 @@ use app::App;
 use db::Db;
 use models::Status;
 
-fn main() -> Result<()> {
-    let db_path = {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        format!("{home}/.scrumtui.db")
-    };
+/// Resolve the database path using this priority order:
+///   1. `--db <path>` CLI flag
+///   2. `SCRUMTUI_DB` environment variable
+///   3. `db_path` key in `$XDG_CONFIG_HOME/scrumtui/config` (or `~/.config/scrumtui/config`)
+///   4. Legacy default: `~/.scrumtui.db`
+fn resolve_db_path(args: &[String]) -> String {
+    // 1. --db flag
+    for i in 0..args.len() {
+        if args[i] == "--db" {
+            if let Some(p) = args.get(i + 1) {
+                return p.clone();
+            }
+        }
+    }
 
+    // 2. Environment variable
+    if let Ok(v) = std::env::var("SCRUMTUI_DB") {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+
+    // 3. Config file
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let config_dir = std::env::var("XDG_CONFIG_HOME")
+        .unwrap_or_else(|_| format!("{home}/.config"));
+    let config_path = format!("{config_dir}/scrumtui/config");
+    if let Ok(contents) = std::fs::read_to_string(&config_path) {
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.starts_with('#') || line.is_empty() { continue; }
+            if let Some(rest) = line.strip_prefix("db_path") {
+                let rest = rest.trim_start_matches(|c: char| c == '=' || c == ' ');
+                if !rest.is_empty() {
+                    return rest.to_string();
+                }
+            }
+        }
+    }
+
+    // 4. Legacy default
+    format!("{home}/.scrumtui.db")
+}
+
+fn main() -> Result<()> {
     // ── CLI subcommands ────────────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().collect();
+
+    // Resolve DB path: --db flag > $SCRUMTUI_DB > config file > ~/.scrumtui.db (legacy)
+    let db_path = resolve_db_path(&args);
+
+    // Strip --db <path> from args so subcommand parsing is unaffected.
+    let args: Vec<String> = {
+        let mut clean = Vec::new();
+        let mut i = 0usize;
+        while i < args.len() {
+            if args[i] == "--db" {
+                i += 2; // skip flag and its value
+            } else {
+                clean.push(args[i].clone());
+                i += 1;
+            }
+        }
+        clean
+    };
+
     match args.get(1).map(|s| s.as_str()) {
         Some("import") => {
             let csv_path = args.get(2).map(|s| s.as_str()).unwrap_or_else(|| {
@@ -286,7 +344,7 @@ fn print_help() {
     println!("scrumtui {} — local terminal scrum board", env!("CARGO_PKG_VERSION"));
     println!();
     println!("USAGE:");
-    println!("  scrumtui                           open the TUI");
+    println!("  scrumtui [--db <path>]             open the TUI");
     println!("  scrumtui init                      initialize a blank database");
     println!("  scrumtui init --demo               initialize with demo/seed data");
     println!("  scrumtui add \"Title\" [flags]       create a new issue");
@@ -295,6 +353,12 @@ fn print_help() {
     println!("  scrumtui import <path.csv>          import Jira CSV");
     println!("  scrumtui export [output.md]         export to markdown");
     println!("  scrumtui --version                  print version");
+    println!();
+    println!("DATABASE PATH (in priority order):");
+    println!("  --db <path>                        explicit path flag");
+    println!("  $SCRUMTUI_DB                       environment variable");
+    println!("  ~/.config/scrumtui/config          config file (db_path = /path/to/file.db)");
+    println!("  ~/.scrumtui.db                     legacy default");
     println!();
     println!("ADD FLAGS:");
     println!("  -e, --epic <name>      epic label (default: general)");

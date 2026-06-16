@@ -95,6 +95,8 @@ pub struct Issue {
     /// Display rank within the backlog/sprint (lower = higher priority).
     #[allow(dead_code)]
     pub rank: i64,
+    /// Number of sprints this issue has been carried over from (not completed).
+    pub carry_count: i64,
 }
 
 /// Display story points without unnecessary trailing zeros.

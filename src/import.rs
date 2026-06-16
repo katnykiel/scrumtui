@@ -218,13 +218,18 @@ pub fn import_jira_csv(db: &Db, path: &str) -> Result<ImportReport> {
         sprint_name_to_id.insert(sprint_name.clone(), sprint_id);
     }
 
-    // Assign sprint_id to issues
+    // Assign sprint_id to issues and set due_date to sprint end date
     for (jira_key, sprint_name) in &key_to_sprint {
         if let (Some(&local_id), Some(&sprint_id)) = (
             key_to_id.get(jira_key),
             sprint_name_to_id.get(sprint_name),
         ) {
             let _ = db.set_issue_sprint(local_id, Some(sprint_id));
+            // Set the issue due_date to the sprint end date so imported issues
+            // don't show a confusing short date range.
+            if let Some((_, end)) = sprint_dates.get(sprint_name) {
+                let _ = db.set_issue_due_date(local_id, *end);
+            }
         }
     }
 
