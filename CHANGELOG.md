@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.1.0] — 2026-06-22
+
+### Changed
+- **Kanban cards**: item number (`#id`) removed from the metadata line; titles now word-wrap across multiple lines instead of truncating
+- **Epic status** in the Gantt view now uses the same logic as subtasks — all-done → green, all-todo → yellow, any mix (done+todo or any in-progress) → cyan
+- **Epics** in the Gantt view are now sorted by date started (newest first) instead of alphabetically
+- **Subtasks** now display in creation order (oldest first) in the backlog, kanban panel, and issue form — previously they were shown newest-first
+- **Word deletion** (`Alt+Backspace`) now also triggers on `Ctrl+Backspace` and `Ctrl+W` in all text fields (search, issue form, sprint form, subtask titles)
+- **Bottom hint bars** cleaned up across all views — removed stale shortcuts (`^j/^k`, `[S]mgr`, view-switch keys); each view now shows only: new, edit, status, search, undo, help (plus any view-specific essentials)
+
+---
+
 ## [1.0.0] — 2026-06-16
 
 First stable release. All core features are present and working: backlog, kanban, gantt, sprint history, subtask management, CLI subcommands, and Jira import/export.

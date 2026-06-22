@@ -399,15 +399,19 @@ impl App {
     }
 
     fn build_epics_cache(issues: &[Issue]) -> Vec<String> {
-        let mut seen = std::collections::HashSet::new();
-        let mut epics: Vec<String> = issues
-            .iter()
-            .filter(|i| !i.epic.is_empty())
-            .filter_map(|i| {
-                if seen.insert(i.epic.clone()) { Some(i.epic.clone()) } else { None }
-            })
-            .collect();
-        epics.sort();
+        use chrono::NaiveDateTime;
+        // Compute the earliest created_at across all top-level issues per epic.
+        let mut epic_starts: std::collections::HashMap<String, NaiveDateTime> =
+            std::collections::HashMap::new();
+        for issue in issues.iter().filter(|i| !i.epic.is_empty() && i.parent_id.is_none()) {
+            let entry = epic_starts.entry(issue.epic.clone()).or_insert(issue.created_at);
+            if issue.created_at < *entry {
+                *entry = issue.created_at;
+            }
+        }
+        let mut epics: Vec<String> = epic_starts.keys().cloned().collect();
+        // Sort by earliest start date descending — most recently started epic first.
+        epics.sort_by(|a, b| epic_starts[b].cmp(&epic_starts[a]));
         epics
     }
 
@@ -576,13 +580,16 @@ impl App {
         let q = self.search_query.to_lowercase();
 
         // Build children lookup from the stable snapshot: parent_id → Vec<Issue>
-        // Children preserve the DB order (rank DESC) relative to their parent.
+        // DB returns newest-first; we reverse each vec so subtasks appear in creation order.
         let mut children_map: std::collections::HashMap<i64, Vec<Issue>> =
             std::collections::HashMap::new();
         for issue in &self.display_issues {
             if let Some(pid) = issue.parent_id {
                 children_map.entry(pid).or_default().push(issue.clone());
             }
+        }
+        for subs in children_map.values_mut() {
+            subs.reverse();
         }
 
         let search_matches = |issue: &Issue| -> bool {
@@ -752,12 +759,17 @@ impl App {
     /// All subtasks of the focused parent, across all statuses (flat list for the sub panel).
     pub fn sprint_subtasks_flat(&self) -> Vec<Issue> {
         match self.kanban_sub_parent() {
-            Some(parent) => self
-                .display_issues
-                .iter()
-                .filter(|i| i.parent_id == Some(parent.id))
-                .cloned()
-                .collect(),
+            Some(parent) => {
+                let mut subs: Vec<Issue> = self
+                    .display_issues
+                    .iter()
+                    .filter(|i| i.parent_id == Some(parent.id))
+                    .cloned()
+                    .collect();
+                // DB returns newest-first; reverse to show subtasks in creation order.
+                subs.reverse();
+                subs
+            }
             None => vec![],
         }
     }
@@ -782,7 +794,7 @@ impl App {
 
     /// Build SubtaskDraft list from loaded issues for a given parent.
     pub fn subtask_drafts_for(&self, parent_id: i64) -> Vec<SubtaskDraft> {
-        self.issues
+        let mut drafts: Vec<SubtaskDraft> = self.issues
             .iter()
             .filter(|i| i.parent_id == Some(parent_id))
             .map(|i| SubtaskDraft {
@@ -791,7 +803,10 @@ impl App {
                 status_idx: i.status.index(),
                 deleted: false,
             })
-            .collect()
+            .collect();
+        // DB returns newest-first; reverse to show subtasks in creation order.
+        drafts.reverse();
+        drafts
     }
 
     /// Unique epics across all issues, sorted alphabetically (cached).
@@ -992,7 +1007,7 @@ impl App {
                     self.backlog_sel_to_first_issue();
                 }
                 KeyCode::Backspace => {
-                    if key.modifiers.contains(KeyModifiers::ALT) {
+                    if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) {
                         delete_word(&mut self.search_query);
                     } else {
                         self.search_query.pop();
@@ -1000,7 +1015,11 @@ impl App {
                     self.backlog_sel_to_first_issue();
                 }
                 KeyCode::Char(c) => {
-                    self.search_query.push(c);
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'w' {
+                        delete_word(&mut self.search_query);
+                    } else {
+                        self.search_query.push(c);
+                    }
                     self.backlog_sel_to_first_issue();
                 }
                 _ => {}
@@ -2053,7 +2072,7 @@ impl App {
                     popup.epic_dropdown_open = false;
                 }
                 KeyCode::Backspace => {
-                    if key.modifiers.contains(KeyModifiers::ALT) {
+                    if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) {
                         delete_word(&mut popup.epic);
                     } else {
                         popup.epic.pop();
@@ -2108,7 +2127,7 @@ impl App {
                     popup.due_date_dropdown_open = false;
                 }
                 KeyCode::Backspace => {
-                    if key.modifiers.contains(KeyModifiers::ALT) {
+                    if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) {
                         delete_word(&mut popup.due_date);
                     } else {
                         popup.due_date.pop();
@@ -2127,7 +2146,7 @@ impl App {
         } else if let Some(field) = popup.active_text_field() {
             match key.code {
                 KeyCode::Backspace => {
-                    if key.modifiers.contains(KeyModifiers::ALT) {
+                    if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) {
                         delete_word(field);
                     } else {
                         field.pop();
@@ -2143,17 +2162,29 @@ impl App {
                         popup.due_date_dropdown_sel = 0;
                     }
                 }
-                KeyCode::Char(c) => {
-                    field.push(c);
-                    // Open epic dropdown on any char input in epic field
-                    if popup.focused_field == 1 {
-                        popup.epic_dropdown_open = true;
-                        popup.epic_dropdown_sel = 0;
-                    }
-                    // Open due-date dropdown on any char input in due-date field
-                    if popup.focused_field == 4 {
-                        popup.due_date_dropdown_open = true;
-                        popup.due_date_dropdown_sel = 0;
+                                 KeyCode::Char(c) => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'w' {
+                        delete_word(field);
+                        if popup.focused_field == 1 {
+                            popup.epic_dropdown_open = !popup.epic.is_empty();
+                            popup.epic_dropdown_sel = 0;
+                        }
+                        if popup.focused_field == 4 {
+                            popup.due_date_dropdown_open = true;
+                            popup.due_date_dropdown_sel = 0;
+                        }
+                    } else {
+                        field.push(c);
+                        // Open epic dropdown on any char input in epic field
+                        if popup.focused_field == 1 {
+                            popup.epic_dropdown_open = true;
+                            popup.epic_dropdown_sel = 0;
+                        }
+                        // Open due-date dropdown on any char input in due-date field
+                        if popup.focused_field == 4 {
+                            popup.due_date_dropdown_open = true;
+                            popup.due_date_dropdown_sel = 0;
+                        }
                     }
                 }
                 _ => {}
@@ -2188,7 +2219,7 @@ impl App {
                     }
                 }
                 KeyCode::Backspace => {
-                    if key.modifiers.contains(KeyModifiers::ALT) {
+                    if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) {
                         if let Some(st) = popup.subtasks.get_mut(popup.subtask_sel) {
                             delete_word(&mut st.title);
                         }
@@ -2197,7 +2228,11 @@ impl App {
                     }
                 }
                 KeyCode::Char(c) => {
-                    if let Some(st) = popup.subtasks.get_mut(popup.subtask_sel) {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'w' {
+                        if let Some(st) = popup.subtasks.get_mut(popup.subtask_sel) {
+                            delete_word(&mut st.title);
+                        }
+                    } else if let Some(st) = popup.subtasks.get_mut(popup.subtask_sel) {
                         st.title.push(c);
                     }
                 }
@@ -2388,14 +2423,18 @@ impl App {
         } else if let Some(field) = popup.active_text_field() {
             match key.code {
                 KeyCode::Backspace => {
-                    if key.modifiers.contains(KeyModifiers::ALT) {
+                    if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) {
                         delete_word(field);
                     } else {
                         field.pop();
                     }
                 }
                 KeyCode::Char(c) => {
-                    field.push(c);
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'w' {
+                        delete_word(field);
+                    } else {
+                        field.push(c);
+                    }
                 }
                 _ => {}
             }

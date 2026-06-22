@@ -13,6 +13,33 @@ use crate::ui::backlog::{status_color, status_symbol, trunc};
 
 const STATUSES: [Status; 3] = [Status::Todo, Status::InProgress, Status::Done];
 
+/// Split `text` into lines that fit within `width` characters, breaking on word boundaries.
+fn word_wrap(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.len() + 1 + word.len() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(current.clone());
+            current = word.to_string();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 fn due_color(due: &chrono::NaiveDate, done: bool) -> Color {
     if done { return Color::DarkGray; }
     let today = Local::now().date_naive();
@@ -25,12 +52,12 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 
     let hint = if has_subs {
         if app.kanban_panel == 1 {
-            " [h/l] col  [j/k] nav  [Tab] panel  [</>] parent  []/[] status  [e] edit  [?]help "
+            " [e] edit  []/[] status  [Tab] parent  [</>] cycle  [u] undo  [?] help "
         } else {
-            " [h/l] col  [j/k] nav  [Tab] sub-panel  []/[] status  [e] edit  [?]help "
+            " [n] new  [e] edit  []/[] status  [Tab] subs  [u] undo  [?] help "
         }
     } else {
-        " [h/l] col  [j/k] nav  []/[] status  [e] edit  [?]help "
+        " [n] new  [e] edit  []/[] status  [/] search  [u] undo  [?] help "
     };
 
     let outer = Block::default()
@@ -223,7 +250,8 @@ fn render_column(
         .map(|(row, issue)| {
             let is_sel = is_active_col && row == selected_row;
             let pointer = if is_sel { "▶" } else { " " };
-            let title_w = col_w.saturating_sub(4);
+            // available width for title text: col_w minus 2 borders minus pointer minus space
+            let title_w = col_w.saturating_sub(4).max(4);
             let is_done = issue.status == Status::Done;
             let (done_subs, total_subs) = app.subtask_counts(issue.id);
             let sub_badge = if total_subs > 0 { format!("  [{}/{}]", done_subs, total_subs) } else { String::new() };
@@ -239,22 +267,39 @@ fn render_column(
             } else {
                 Style::default().add_modifier(Modifier::BOLD)
             };
-            ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled(pointer, Style::default().fg(Color::Magenta)),
-                    Span::styled(format!(" {}", trunc(&issue.title, title_w)), title_style),
-                ]),
-                Line::from(vec![
-                    Span::styled(
-                        format!("   #{} · {}sp  {}{}", issue.id, format_sp(issue.story_points), trunc(&issue.epic, 14), sub_badge),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(carry_badge, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                    Span::styled(due_str, Style::default().fg(
-                        issue.due_date.map(|d| due_color(&d, is_done)).unwrap_or(Color::DarkGray)
-                    )),
-                ]),
-            ])
+
+            // Word-wrap the title across multiple lines.
+            let title_lines = word_wrap(&issue.title, title_w);
+            let mut lines: Vec<Line> = title_lines
+                .into_iter()
+                .enumerate()
+                .map(|(i, chunk)| {
+                    if i == 0 {
+                        Line::from(vec![
+                            Span::styled(pointer, Style::default().fg(Color::Magenta)),
+                            Span::styled(format!(" {}", chunk), title_style),
+                        ])
+                    } else {
+                        Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(chunk, title_style),
+                        ])
+                    }
+                })
+                .collect();
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("   {}sp  {}{}", format_sp(issue.story_points), trunc(&issue.epic, 14), sub_badge),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(carry_badge, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(due_str, Style::default().fg(
+                    issue.due_date.map(|d| due_color(&d, is_done)).unwrap_or(Color::DarkGray)
+                )),
+            ]));
+
+            ListItem::new(lines)
         })
         .collect();
 

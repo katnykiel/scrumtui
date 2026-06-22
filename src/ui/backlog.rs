@@ -106,7 +106,7 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
             BacklogItem::Issue(issue, in_sprint) => {
                 let sym = status_symbol(&issue.status);
                 let sc = status_color(&issue.status);
-                let indent = if *in_sprint { "  │  " } else { "     " };
+                let indent = if *in_sprint { " │  " } else { "    " };
                 let due = issue.due_date
                     .map(|d| format!("  {}", d.format("%b %d")))
                     .unwrap_or_default();
@@ -152,7 +152,7 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
             BacklogItem::Subtask(sub, in_sprint) => {
                 let sym = status_symbol(&sub.status);
                 let sc = status_color(&sub.status);
-                let indent = if *in_sprint { "  │     └ " } else { "        └ " };
+                let indent = if *in_sprint { " │     └ " } else { "       └ " };
                 let pointer = if idx == selected { "▶" } else { " " };
                 // Subtasks: terminal default fg for active, DarkGray for done.
                 // Not bold — subtler than parent issues to show hierarchy.
@@ -185,7 +185,7 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
                     Span::raw(" "),
                 ]))
                 .title_bottom(Line::from(Span::styled(
-                    " [n]ew  [e]dit  [d]elete  []/[]status  [s]print  [S]mgr  [/]search  [c]done  [^j/^k]rank  [u]ndo  [?]help ",
+                    " [n] new  [e] edit  []/[] status  [/] search  [u] undo  [?] help ",
                     Style::default().fg(Color::DarkGray),
                 )))
                 .border_style(Style::default().fg(Color::Rgb(100, 100, 160))),

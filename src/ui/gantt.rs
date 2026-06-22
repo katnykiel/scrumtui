@@ -99,13 +99,14 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         let ip_count   = epic_issues.iter().filter(|i| i.status == Status::InProgress).count();
         let done_count = epic_issues.iter().filter(|i| i.status == Status::Done).count();
 
-        // Determine overall epic status color: if all done → green, any IP → cyan, else yellow
+        // Determine overall epic status color (mirrors subtask logic):
+        // all done → green, all todo → yellow, any mix (todo+done or any IP) → cyan
         let (epic_status_color, epic_fill) = if done_count == epic_issues.len() {
             (Color::Green, '█')
-        } else if ip_count > 0 {
-            (Color::Cyan, '▓')
-        } else {
+        } else if todo_count == epic_issues.len() {
             (Color::Yellow, '░')
+        } else {
+            (Color::Cyan, '▓')
         };
 
         let bar = build_bar(epic_start, epic_end, timeline_start, total_days, epic_fill);
@@ -149,7 +150,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         ]), true));
     }
 
-    let hint_str = " [j/k] navigate  [Enter/e] epic detail  [1]backlog  [2]kanban  [3]gantt  [?]help ";
+    let hint_str = " [e] detail  [/] search  [?] help ";
 
     // Skip lines for scroll
     let scroll = app.gantt_scroll.min(all_lines.len().saturating_sub(1));
