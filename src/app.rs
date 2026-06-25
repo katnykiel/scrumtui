@@ -400,18 +400,18 @@ impl App {
 
     fn build_epics_cache(issues: &[Issue]) -> Vec<String> {
         use chrono::NaiveDateTime;
-        // Compute the latest updated_at across all top-level issues per epic.
-        let mut epic_latest: std::collections::HashMap<String, NaiveDateTime> =
+        // Compute the earliest created_at across all top-level issues per epic.
+        let mut epic_starts: std::collections::HashMap<String, NaiveDateTime> =
             std::collections::HashMap::new();
         for issue in issues.iter().filter(|i| !i.epic.is_empty() && i.parent_id.is_none()) {
-            let entry = epic_latest.entry(issue.epic.clone()).or_insert(issue.updated_at);
-            if issue.updated_at > *entry {
-                *entry = issue.updated_at;
+            let entry = epic_starts.entry(issue.epic.clone()).or_insert(issue.created_at);
+            if issue.created_at < *entry {
+                *entry = issue.created_at;
             }
         }
-        let mut epics: Vec<String> = epic_latest.keys().cloned().collect();
-        // Sort by latest edit descending — most recently edited epic first.
-        epics.sort_by(|a, b| epic_latest[b].cmp(&epic_latest[a]));
+        let mut epics: Vec<String> = epic_starts.keys().cloned().collect();
+        // Sort by earliest start date descending — most recently started epic first.
+        epics.sort_by(|a, b| epic_starts[b].cmp(&epic_starts[a]));
         epics
     }
 

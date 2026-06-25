@@ -725,14 +725,14 @@ fn render_sprint_form(f: &mut Frame, form: &SprintForm, app: &App) {
     );
 }
 
-/// Compute burndown chart data from a sprint's date range and its issues.
+/// Compute burnup chart data from a sprint's date range and its issues.
 ///
 /// Returns (scope_line, ideal_line, actual_line, total_sp, sprint_days) where:
-/// - scope_line: flat horizontal line at total_sp (shows total scope)
-/// - ideal_line: diagonal from (0, total_sp) to (sprint_days, 0) — ideal burndown rate
-/// - actual_line: remaining SP step function — decreases when issues are completed
+/// - scope_line: step function — starts at initial SP, steps up as issues are added mid-sprint
+/// - ideal_line: straight line from (0, 0) to (sprint_days, total_sp) — perfect steady pace
+/// - actual_line: completed SP step function — starts at 0, steps up as issues are marked Done
 ///
-/// X axis is fractional days from sprint start (so completion timestamps are exact, not rounded to day).
+/// All three lines have non-negative slopes. X axis is fractional days from sprint start.
 pub fn compute_burnup_for(
     start: chrono::NaiveDate,
     end: chrono::NaiveDate,
@@ -788,11 +788,11 @@ pub fn compute_burnup_for(
         scope
     };
 
-    // Ideal burndown: straight line from (0, total_sp) to (sprint_days, 0)
-    let ideal: Vec<(f64, f64)> = vec![(0.0, total_sp), (sprint_days, 0.0)];
+    // Ideal burnup: straight line from (0, 0) to (sprint_days, total_sp)
+    let ideal: Vec<(f64, f64)> = vec![(0.0, 0.0), (sprint_days, total_sp)];
 
-    // Actual burndown: step function of remaining story points.
-    // Collect all completion events sorted by exact timestamp (fractional days).
+    // Actual burnup: step function of completed story points.
+    // Starts at 0 and steps up each time an issue is marked Done.
     let cutoff = now.min(sprint_end_dt);
 
     // Gather completion events within sprint window
@@ -822,15 +822,15 @@ pub fn compute_burnup_for(
     // Sort by time
     events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Build step function: start at total_sp, subtract SP at each completion moment
+    // Build step function: start at 0, add SP at each completion moment
     let mut actual: Vec<(f64, f64)> = Vec::new();
-    let mut remaining = total_sp;
-    actual.push((0.0, remaining));
+    let mut completed = 0.0_f64;
+    actual.push((0.0, completed));
     for (x, sp) in &events {
-        // Add a point just before the step (keeps the horizontal segment)
-        actual.push((*x, remaining));
-        remaining -= sp;
-        actual.push((*x, remaining));
+        // Horizontal segment up to the step, then jump up
+        actual.push((*x, completed));
+        completed += sp;
+        actual.push((*x, completed));
     }
     // Extend to current time (or end of sprint)
     let current_x = {
@@ -838,7 +838,7 @@ pub fn compute_burnup_for(
         cx.clamp(0.0, sprint_days)
     };
     if actual.last().map(|(x, _)| *x).unwrap_or(0.0) < current_x {
-        actual.push((current_x, remaining));
+        actual.push((current_x, completed));
     }
 
     Some((scope, ideal, actual, total_sp, sprint_days))
@@ -857,7 +857,7 @@ pub fn render_burnup_chart(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .title(Span::styled(
-            " burndown ",
+            " burnup ",
             Style::default().fg(Color::DarkGray),
         ))
         .border_style(Style::default().fg(Color::Rgb(80, 60, 100)));
