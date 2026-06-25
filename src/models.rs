@@ -91,12 +91,31 @@ pub struct Issue {
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
     pub completed_at: Option<NaiveDateTime>,
+    pub started_at: Option<NaiveDateTime>,
     pub parent_id: Option<i64>,
     /// Display rank within the backlog/sprint (lower = higher priority).
     #[allow(dead_code)]
     pub rank: i64,
     /// Number of sprints this issue has been carried over from (not completed).
     pub carry_count: i64,
+}
+
+/// Format the elapsed duration between two timestamps as a human-readable string.
+/// e.g. "3d 2h", "45m", "< 1m"
+pub fn format_duration(start: NaiveDateTime, end: NaiveDateTime) -> String {
+    let secs = (end - start).num_seconds().max(0);
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+    if days > 0 {
+        format!("{}d {}h", days, hours)
+    } else if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else if mins > 0 {
+        format!("{}m", mins)
+    } else {
+        "< 1m".to_string()
+    }
 }
 
 /// Display story points without unnecessary trailing zeros.

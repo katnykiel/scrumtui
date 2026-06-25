@@ -7,6 +7,20 @@ use std::time::Instant;
 use crate::db::Db;
 use crate::models::{Issue, Sprint, Status};
 
+// ── Fuzzy match ───────────────────────────────────────────────────────────────
+
+/// Returns true if every character in `query` appears in `haystack` in order
+/// (subsequence / fuzzy match). Both should already be lowercased.
+fn fuzzy_match(query: &str, haystack: &str) -> bool {
+    let mut haystack_chars = haystack.chars();
+    for qc in query.chars() {
+        if !haystack_chars.any(|hc| hc == qc) {
+            return false;
+        }
+    }
+    true
+}
+
 // ── View ──────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -600,7 +614,7 @@ impl App {
                 issue.epic.to_lowercase(),
                 issue.description.as_deref().unwrap_or("").to_lowercase()
             );
-            haystack.contains(&q)
+            fuzzy_match(&q, &haystack)
         };
 
         let emit_with_subtasks = |items: &mut Vec<BacklogItem>,

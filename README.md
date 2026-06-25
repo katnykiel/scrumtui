@@ -2,7 +2,7 @@
 
 A minimal, local, terminal-based scrum system driven by keyboard shortcuts. I use scrum every day to manage my research, and got sick of the existing scrum systems, so I vibe-coded this TUI to fit my needs. Maybe you'll find it useful too!
 
-**Version 1.2.0**
+**Version 1.3.0**
 
 ---
 
@@ -65,7 +65,7 @@ scrumtui export [output.md]
 
 ## Issue fields
 
-Title, epic, story points, status, due date (`YYYY-MM-DD`), description, subtasks. Epic and due date autocomplete from existing values. Subtask statuses roll up to the parent automatically.
+Title, epic, story points, status, due date (`YYYY-MM-DD`), description, subtasks. Epic and due date autocomplete from existing values. Subtask statuses roll up to the parent automatically. An **actual time** field tracks how long an issue was in progress (from first move to In Progress through completion), shown in the detail panel of both Backlog and Kanban views.
 
 ---
 

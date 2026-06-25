@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{App, BacklogItem};
-use crate::models::{format_sp, Status};
+use crate::models::{format_duration, format_sp, Status};
 
 pub fn status_color(status: &Status) -> Color {
     match status {
@@ -250,6 +250,15 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(desc, Style::default().fg(Color::DarkGray)),
         ]));
     }
+    // Compute how long the issue was / has been in progress
+    let time_str = if let Some(start) = issue.started_at {
+        let end = issue.completed_at.unwrap_or_else(|| chrono::Local::now().naive_local());
+        let label = if issue.status == Status::Done { "actual" } else { "ongoing" };
+        format!("{}  {}", format_duration(start, end), label)
+    } else {
+        String::new()
+    };
+
     lines.push(Line::from(vec![
         Span::styled("  due ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{:<12}", due_str), Style::default().fg(Color::Yellow)),
@@ -258,8 +267,14 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("  updated ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{:<17}", updated), Style::default().fg(Color::DarkGray)),
         Span::styled("  done ", Style::default().fg(Color::DarkGray)),
-        Span::styled(completed, Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{:<17}", completed), Style::default().fg(Color::DarkGray)),
     ]));
+    if !time_str.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("  time ", Style::default().fg(Color::DarkGray)),
+            Span::styled(time_str, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        ]));
+    }
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
 }

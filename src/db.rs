@@ -72,6 +72,9 @@ impl Db {
         let _ = self.conn.execute_batch(
             "ALTER TABLE issues ADD COLUMN carry_count INTEGER NOT NULL DEFAULT 0;",
         );
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE issues ADD COLUMN started_at TEXT;",
+        );
         // Settings table for persisting UI preferences
         let _ = self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS settings (
@@ -110,7 +113,8 @@ impl Db {
     pub fn get_all_issues(&self) -> Result<Vec<Issue>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count
+                    sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count,
+                    started_at
              FROM issues
              WHERE deleted_at IS NULL
              ORDER BY (sprint_id IS NULL),
@@ -122,6 +126,7 @@ impl Db {
                 let status_str: String = row.get(4)?;
                 let due_str: Option<String> = row.get(5)?;
                 let completed_str: Option<String> = row.get(10)?;
+                let started_str: Option<String> = row.get(14)?;
                 Ok(Issue {
                     id: row.get(0)?,
                     title: row.get(1)?,
@@ -139,6 +144,7 @@ impl Db {
                     parent_id: row.get(11)?,
                     rank: row.get(12)?,
                     carry_count: row.get(13).unwrap_or(0),
+                    started_at: started_str.as_deref().map(parse_dt),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -148,13 +154,15 @@ impl Db {
     pub fn get_issue(&self, id: i64) -> Result<Issue> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count
+                    sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count,
+                    started_at
              FROM issues WHERE id = ?1",
         )?;
         let issue = stmt.query_row(params![id], |row| {
             let status_str: String = row.get(4)?;
             let due_str: Option<String> = row.get(5)?;
             let completed_str: Option<String> = row.get(10)?;
+            let started_str: Option<String> = row.get(14)?;
             Ok(Issue {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -172,6 +180,7 @@ impl Db {
                 parent_id: row.get(11)?,
                 rank: row.get(12)?,
                 carry_count: row.get(13).unwrap_or(0),
+                started_at: started_str.as_deref().map(parse_dt),
             })
         })?;
         Ok(issue)
@@ -250,12 +259,22 @@ impl Db {
             }
             _ => None,
         };
+        // Preserve started_at if already set; set it if transitioning to InProgress/Done;
+        // clear it if going back to Todo
+        let started_at: Option<String> = match status {
+            Status::Todo => None,
+            Status::InProgress | Status::Done => {
+                prev.started_at
+                    .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .or_else(|| Some(now.clone()))
+            }
+        };
         self.conn.execute(
             "UPDATE issues
              SET title=?1, story_points=?2, epic=?3, status=?4, due_date=?5,
-                 description=?6, updated_at=?7, completed_at=?8, parent_id=?9
-             WHERE id=?10",
-            params![title, story_points, epic, status.to_db(), due_str, description, now, completed_at, parent_id, id],
+                 description=?6, updated_at=?7, completed_at=?8, parent_id=?9, started_at=?10
+             WHERE id=?11",
+            params![title, story_points, epic, status.to_db(), due_str, description, now, completed_at, parent_id, started_at, id],
         )?;
         Ok(())
     }
@@ -298,7 +317,8 @@ impl Db {
     pub fn get_trash(&self) -> Result<Vec<Issue>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count
+                    sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count,
+                    started_at
              FROM issues
              WHERE deleted_at IS NOT NULL AND parent_id IS NULL
              ORDER BY deleted_at DESC",
@@ -308,6 +328,7 @@ impl Db {
                 let status_str: String = row.get(4)?;
                 let due_str: Option<String> = row.get(5)?;
                 let completed_str: Option<String> = row.get(10)?;
+                let started_str: Option<String> = row.get(14)?;
                 Ok(Issue {
                     id: row.get(0)?,
                     title: row.get(1)?,
@@ -325,6 +346,7 @@ impl Db {
                     parent_id: row.get(11)?,
                     rank: row.get(12)?,
                     carry_count: row.get(13).unwrap_or(0),
+                    started_at: started_str.as_deref().map(parse_dt),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -419,17 +441,18 @@ impl Db {
         let due_str = snap.due_date.map(|d| d.format("%Y-%m-%d").to_string());
         let updated_str = snap.updated_at.format("%Y-%m-%d %H:%M:%S").to_string();
         let completed_str = snap.completed_at.map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string());
+        let started_str = snap.started_at.map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string());
         self.conn.execute(
             "UPDATE issues
              SET title=?1, story_points=?2, epic=?3, status=?4, due_date=?5,
                  description=?6, sprint_id=?7, updated_at=?8, completed_at=?9,
-                 parent_id=?10, rank=?11, deleted_at=NULL
-             WHERE id=?12",
+                 parent_id=?10, rank=?11, started_at=?12, deleted_at=NULL
+             WHERE id=?13",
             params![
                 snap.title, snap.story_points, snap.epic, snap.status.to_db(),
                 due_str, snap.description, snap.sprint_id,
                 updated_str, completed_str,
-                snap.parent_id, snap.rank,
+                snap.parent_id, snap.rank, started_str,
                 snap.id,
             ],
         )?;
@@ -494,10 +517,31 @@ impl Db {
         } else {
             None
         };
-        self.conn.execute(
-            "UPDATE issues SET status=?1, updated_at=?2, completed_at=?3 WHERE id=?4",
-            params![status.to_db(), now, completed_at, issue_id],
-        )?;
+        match status {
+            Status::InProgress => {
+                // Set started_at only if not already set (preserve first start time)
+                self.conn.execute(
+                    "UPDATE issues SET status=?1, updated_at=?2, completed_at=?3,
+                     started_at = CASE WHEN started_at IS NULL THEN ?2 ELSE started_at END
+                     WHERE id=?4",
+                    params![status.to_db(), now, completed_at, issue_id],
+                )?;
+            }
+            Status::Todo => {
+                // Regressed to Todo — clear started_at so the clock resets
+                self.conn.execute(
+                    "UPDATE issues SET status=?1, updated_at=?2, completed_at=?3, started_at=NULL WHERE id=?4",
+                    params![status.to_db(), now, completed_at, issue_id],
+                )?;
+            }
+            Status::Done => {
+                // Keep started_at intact; set completed_at
+                self.conn.execute(
+                    "UPDATE issues SET status=?1, updated_at=?2, completed_at=?3 WHERE id=?4",
+                    params![status.to_db(), now, completed_at, issue_id],
+                )?;
+            }
+        }
         // If this issue is a subtask, cascade status update to its parent
         let parent_id: Option<i64> = self.conn.query_row(
             "SELECT parent_id FROM issues WHERE id = ?1",
@@ -537,7 +581,8 @@ impl Db {
     pub fn get_sprint_issues(&self, sprint_id: i64) -> Result<Vec<Issue>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count
+                    sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count,
+                    started_at
              FROM issues
              WHERE sprint_id = ?1 AND parent_id IS NULL
              ORDER BY created_at DESC, id DESC",
@@ -546,6 +591,7 @@ impl Db {
             let status_str: String = row.get(4)?;
             let due_str: Option<String> = row.get(5)?;
             let completed_str: Option<String> = row.get(10)?;
+            let started_str: Option<String> = row.get(14)?;
             Ok(Issue {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -561,6 +607,7 @@ impl Db {
                 parent_id: row.get(11)?,
                 rank: row.get(12)?,
                 carry_count: row.get(13).unwrap_or(0),
+                started_at: started_str.as_deref().map(parse_dt),
             })
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(issues)
