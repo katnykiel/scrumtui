@@ -400,18 +400,18 @@ impl App {
 
     fn build_epics_cache(issues: &[Issue]) -> Vec<String> {
         use chrono::NaiveDateTime;
-        // Compute the earliest created_at across all top-level issues per epic.
-        let mut epic_starts: std::collections::HashMap<String, NaiveDateTime> =
+        // Compute the latest updated_at across all top-level issues per epic.
+        let mut epic_latest: std::collections::HashMap<String, NaiveDateTime> =
             std::collections::HashMap::new();
         for issue in issues.iter().filter(|i| !i.epic.is_empty() && i.parent_id.is_none()) {
-            let entry = epic_starts.entry(issue.epic.clone()).or_insert(issue.created_at);
-            if issue.created_at < *entry {
-                *entry = issue.created_at;
+            let entry = epic_latest.entry(issue.epic.clone()).or_insert(issue.updated_at);
+            if issue.updated_at > *entry {
+                *entry = issue.updated_at;
             }
         }
-        let mut epics: Vec<String> = epic_starts.keys().cloned().collect();
-        // Sort by earliest start date descending — most recently started epic first.
-        epics.sort_by(|a, b| epic_starts[b].cmp(&epic_starts[a]));
+        let mut epics: Vec<String> = epic_latest.keys().cloned().collect();
+        // Sort by latest edit descending — most recently edited epic first.
+        epics.sort_by(|a, b| epic_latest[b].cmp(&epic_latest[a]));
         epics
     }
 
@@ -1191,10 +1191,10 @@ impl App {
                     Err(e) => self.set_status(format!("Error: {e}")),
                 }
             }
-            KeyCode::Char(']') => {
+            KeyCode::Char('l') => {
                 self.backlog_advance_status(1);
             }
-            KeyCode::Char('[') => {
+            KeyCode::Char('h') => {
                 self.backlog_advance_status(-1);
             }
             _ => {}
@@ -1302,14 +1302,14 @@ impl App {
 
     fn handle_kanban_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('h') => {
+            KeyCode::Char('[') => {
                 if self.kanban_col > 0 {
                     let focused_id = self.kanban_selected_issue().map(|i| i.id);
                     self.kanban_col -= 1;
                     self.kanban_clamp_and_follow(focused_id);
                 }
             }
-            KeyCode::Char('l') => {
+            KeyCode::Char(']') => {
                 if self.kanban_col < 2 {
                     let focused_id = self.kanban_selected_issue().map(|i| i.id);
                     self.kanban_col += 1;
@@ -1373,8 +1373,8 @@ impl App {
             }
             KeyCode::Char('j') => self.kanban_down(),
             KeyCode::Char('k') => self.kanban_up(),
-            KeyCode::Char(']') => self.kanban_advance_status(1),
-            KeyCode::Char('[') => self.kanban_advance_status(-1),
+            KeyCode::Char('l') => self.kanban_advance_status(1),
+            KeyCode::Char('h') => self.kanban_advance_status(-1),
             KeyCode::Char('e') | KeyCode::Enter => {
                 if let Some(issue) = self.kanban_selected_issue() {
                     let target = if issue.is_subtask() {
@@ -2097,27 +2097,33 @@ impl App {
                     popup.due_date_dropdown_sel = popup.due_date_dropdown_sel.saturating_sub(1);
                 }
                 KeyCode::Tab => {
-                    // Commit then advance field
+                    // Commit then advance field (only if something is typed)
                     let q = popup.due_date.to_lowercase();
-                    let today = Local::now().format("%Y-%m-%d").to_string();
-                    let dates: std::collections::HashSet<String> = self
-                        .issues
-                        .iter()
-                        .filter_map(|i| i.due_date.map(|d| d.format("%Y-%m-%d").to_string()))
-                        .collect();
-                    let mut dates: Vec<String> = dates.into_iter().collect();
-                    dates.retain(|d| d != &today);
-                    dates.sort();
-                    let mut matches = vec![today];
-                    matches.extend(dates);
-                    matches.retain(|d| d.contains(&q));
-                    let sel = popup.due_date_dropdown_sel.min(matches.len().saturating_sub(1));
+                    let sel_idx = popup.due_date_dropdown_sel;
+                    let chosen = if !q.is_empty() {
+                        let today = Local::now().format("%Y-%m-%d").to_string();
+                        let dates: std::collections::HashSet<String> = self
+                            .issues
+                            .iter()
+                            .filter_map(|i| i.due_date.map(|d| d.format("%Y-%m-%d").to_string()))
+                            .collect();
+                        let mut dates: Vec<String> = dates.into_iter().collect();
+                        dates.retain(|d| d != &today);
+                        dates.sort();
+                        let mut matches = vec![today];
+                        matches.extend(dates);
+                        matches.retain(|d| d.contains(&q));
+                        let sel = sel_idx.min(matches.len().saturating_sub(1));
+                        matches.into_iter().nth(sel)
+                    } else {
+                        None
+                    };
                     let popup = match &mut self.popup {
                         Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
                         _ => return,
                     };
-                    if let Some(chosen) = matches.into_iter().nth(sel) {
-                        popup.due_date = chosen;
+                    if let Some(date) = chosen {
+                        popup.due_date = date;
                     }
                     popup.due_date_dropdown_open = false;
                     popup.due_date_dropdown_sel = 0;
@@ -2125,6 +2131,12 @@ impl App {
                 }
                 KeyCode::Esc => {
                     popup.due_date_dropdown_open = false;
+                }
+                KeyCode::Delete => {
+                    // Clear the entire due date field
+                    popup.due_date.clear();
+                    popup.due_date_dropdown_open = false;
+                    popup.due_date_dropdown_sel = 0;
                 }
                 KeyCode::Backspace => {
                     if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) {
@@ -2289,7 +2301,7 @@ impl App {
                 }
                 return;
             }
-            KeyCode::Char(']') => {
+            KeyCode::Char('l') => {
                 // Advance subtask status
                 let vis_idx = popup.subtask_sel;
                 if let Some(st) = popup.subtasks.iter_mut().filter(|s| !s.deleted).nth(vis_idx) {
@@ -2299,7 +2311,7 @@ impl App {
                 }
                 return;
             }
-            KeyCode::Char('[') => {
+            KeyCode::Char('h') => {
                 // Regress subtask status
                 let vis_idx = popup.subtask_sel;
                 if let Some(st) = popup.subtasks.iter_mut().filter(|s| !s.deleted).nth(vis_idx) {

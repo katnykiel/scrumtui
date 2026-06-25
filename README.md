@@ -2,7 +2,7 @@
 
 A minimal, local, terminal-based scrum system driven by keyboard shortcuts. I use scrum every day to manage my research, and got sick of the existing scrum systems, so I vibe-coded this TUI to fit my needs. Maybe you'll find it useful too!
 
-**Version 1.0.0**
+**Version 1.2.0**
 
 ---
 
@@ -35,13 +35,13 @@ cargo build --release
 
 ## Keys
 
-`j`/`k` navigate, `]`/`[` advance/regress status, `Tab` next field or panel, `e`/`Enter` edit, `Esc` cancel. `?` opens the full help overlay.
+`j`/`k` navigate, `h`/`l` advance/regress status, `Tab` next field or panel, `e`/`Enter` edit, `Esc` cancel. `?` opens the full help overlay.
 
 **Backlog:** `n` new · `e` edit · `d`/`T` trash · `s`/`S` sprint toggle/manager · `c` toggle done · `/` search · `Ctrl-j`/`Ctrl-k` reorder
 
-**Kanban:** `h`/`l` switch column · `Tab` parent↔subtask panel · `<`/`>` cycle parent
+**Kanban:** `[`/`]` switch column · `h`/`l` regress/advance status · `Tab` parent↔subtask panel · `<`/`>` cycle parent
 
-**Forms:** `Tab`/`Shift-Tab` next/prev field · `Ctrl-N` add subtask · `x` remove subtask · `Ctrl-S` save
+**Forms:** `Tab`/`Shift-Tab` next/prev field · `h`/`l` regress/advance subtask status · `Del` clear due date · `Ctrl-N` add subtask · `x` remove subtask · `Ctrl-S` save
 
 ---
 

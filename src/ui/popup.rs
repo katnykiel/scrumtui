@@ -750,16 +750,49 @@ pub fn compute_burnup_for(
     let sprint_days = (end - start).num_days() as f64;
     let start_dt: NaiveDateTime = start.and_hms_opt(0, 0, 0).unwrap();
 
-    // Scope line: flat at total_sp across whole sprint
-    let scope: Vec<(f64, f64)> = vec![(0.0, total_sp), (sprint_days, total_sp)];
+    // Scope line: step function that increases as issues are added during the sprint.
+    // Issues created before sprint start count from day 0; those created mid-sprint
+    // add their SP at their creation timestamp.
+    let now = Local::now().naive_local();
+    let sprint_end_dt: NaiveDateTime = end.and_hms_opt(23, 59, 59).unwrap();
+    let scope = {
+        // Separate issues into "already in scope at start" vs "added mid-sprint"
+        let mut initial_sp: f64 = 0.0;
+        let mut additions: Vec<(f64, f64)> = Vec::new();
+        for i in issues.iter() {
+            let frac = (i.created_at - start_dt).num_seconds() as f64 / 86400.0;
+            if frac <= 0.0 {
+                initial_sp += i.story_points;
+            } else {
+                additions.push((frac.min(sprint_days), i.story_points));
+            }
+        }
+        additions.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut scope: Vec<(f64, f64)> = Vec::new();
+        let mut running = initial_sp;
+        scope.push((0.0, running));
+        for (x, sp) in &additions {
+            scope.push((*x, running));
+            running += sp;
+            scope.push((*x, running));
+        }
+        // Extend to current time (or end of sprint)
+        let current_x = {
+            let cx = (now.min(sprint_end_dt) - start_dt).num_seconds() as f64 / 86400.0;
+            cx.clamp(0.0, sprint_days)
+        };
+        if scope.last().map(|(x, _)| *x).unwrap_or(0.0) < current_x {
+            scope.push((current_x, running));
+        }
+        scope
+    };
 
     // Ideal burndown: straight line from (0, total_sp) to (sprint_days, 0)
     let ideal: Vec<(f64, f64)> = vec![(0.0, total_sp), (sprint_days, 0.0)];
 
     // Actual burndown: step function of remaining story points.
     // Collect all completion events sorted by exact timestamp (fractional days).
-    let now = Local::now().naive_local();
-    let sprint_end_dt: NaiveDateTime = end.and_hms_opt(23, 59, 59).unwrap();
     let cutoff = now.min(sprint_end_dt);
 
     // Gather completion events within sprint window
@@ -1057,7 +1090,7 @@ fn render_help(f: &mut Frame) {
         sep(),
         hdr("GLOBAL"),
         key("j / k", "Navigate up / down"),
-        key("] / [", "Advance / regress status"),
+        key("h / l", "Advance / regress status"),
         key("e", "Edit selected issue"),
         key("n", "New issue"),
         key("u  /  ?", "Undo  /  Help"),
@@ -1071,12 +1104,15 @@ fn render_help(f: &mut Frame) {
         key("/", "Search"),
         sep(),
         hdr("KANBAN"),
-        key("h / l", "Switch column"),
+        key("[ / ]", "Switch column left / right"),
+        key("h / l", "Regress / advance status"),
         key("Tab", "Parent ↔ subtask panel"),
         key("< / >", "Cycle parent in subtask panel"),
         sep(),
         hdr("FORMS"),
         key("Tab / Shift-Tab", "Next / previous field"),
+        key("h / l", "Regress / advance subtask status"),
+        key("Del", "Clear due date field"),
         key("Ctrl-N", "Add subtask"),
         key("x", "Remove subtask"),
         key("Ctrl-S", "Save from any field"),

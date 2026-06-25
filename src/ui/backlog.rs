@@ -185,7 +185,7 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
                     Span::raw(" "),
                 ]))
                 .title_bottom(Line::from(Span::styled(
-                    " [n] new  [e] edit  []/[] status  [/] search  [u] undo  [?] help ",
+                    " [n] new  [e] edit  [h/l] status  [/] search  [u] undo  [?] help ",
                     Style::default().fg(Color::DarkGray),
                 )))
                 .border_style(Style::default().fg(Color::Rgb(100, 100, 160))),
