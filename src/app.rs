@@ -345,6 +345,8 @@ pub struct App {
     pub history_sel: usize,
     /// Sprint history: issues for the selected sprint (loaded on selection change).
     pub history_issues: Vec<Issue>,
+    /// Sprint history: lightweight (sprint_id, total_sp, done_sp) summary for all sprints.
+    pub history_sprint_stats: Vec<(i64, f64, f64)>,
     /// Undo stack — up to 50 entries, most-recent last (pop from end).
     pub undo_stack: Vec<UndoAction>,
     /// When set, the next kanban column switch should follow this issue (id, target_col).
@@ -392,6 +394,7 @@ impl App {
             history_sprints: Vec::new(),
             history_sel: 0,
             history_issues: Vec::new(),
+            history_sprint_stats: Vec::new(),
             undo_stack: Vec::new(),
             pending_kanban_follow: None,
             epics_cache,
@@ -1316,19 +1319,12 @@ impl App {
 
     fn handle_kanban_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('[') => {
-                if self.kanban_col > 0 {
-                    let focused_id = self.kanban_selected_issue().map(|i| i.id);
-                    self.kanban_col -= 1;
-                    self.kanban_clamp_and_follow(focused_id);
-                }
+            // Ctrl-H / Ctrl-L: move the selected issue to the previous / next column
+            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.kanban_advance_status(-1);
             }
-            KeyCode::Char(']') => {
-                if self.kanban_col < 2 {
-                    let focused_id = self.kanban_selected_issue().map(|i| i.id);
-                    self.kanban_col += 1;
-                    self.kanban_clamp_and_follow(focused_id);
-                }
+            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.kanban_advance_status(1);
             }
             KeyCode::Tab => {
                 // Switch between parent and subtask panels (only if subtasks exist)
@@ -1387,8 +1383,21 @@ impl App {
             }
             KeyCode::Char('j') => self.kanban_down(),
             KeyCode::Char('k') => self.kanban_up(),
-            KeyCode::Char('l') => self.kanban_advance_status(1),
-            KeyCode::Char('h') => self.kanban_advance_status(-1),
+            // h / l: navigate between columns
+            KeyCode::Char('l') => {
+                if self.kanban_col < 2 {
+                    let focused_id = self.kanban_selected_issue().map(|i| i.id);
+                    self.kanban_col += 1;
+                    self.kanban_clamp_and_follow(focused_id);
+                }
+            }
+            KeyCode::Char('h') => {
+                if self.kanban_col > 0 {
+                    let focused_id = self.kanban_selected_issue().map(|i| i.id);
+                    self.kanban_col -= 1;
+                    self.kanban_clamp_and_follow(focused_id);
+                }
+            }
             KeyCode::Char('e') | KeyCode::Enter => {
                 if let Some(issue) = self.kanban_selected_issue() {
                     let target = if issue.is_subtask() {
@@ -1498,6 +1507,7 @@ impl App {
     pub fn load_sprint_history(&mut self) {
         self.history_sprints = self.db.get_all_sprints().unwrap_or_default();
         self.history_sel = self.history_sel.min(self.history_sprints.len().saturating_sub(1));
+        self.history_sprint_stats = self.db.get_all_sprint_summary().unwrap_or_default();
         self.load_history_issues();
     }
 
@@ -2048,7 +2058,7 @@ impl App {
             }
             // Status field not open: any printable key or Enter/Space opens the dropdown
             match key.code {
-                KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('[') | KeyCode::Char(']') => {
+                KeyCode::Enter | KeyCode::Char(' ') => {
                     popup.status_dropdown_sel = popup.status_idx;
                     popup.status_dropdown_open = true;
                 }
@@ -2399,21 +2409,42 @@ impl App {
                 self.popup = None;
 
                 // If activating a new sprint, bump carry_count for the old sprint's
-                // incomplete issues before we deactivate it.
-                if active {
+                // incomplete issues before we deactivate it, then carry them forward.
+                let old_sprint_id_for_carry = if active {
                     if let Some(ref old_sprint) = self.active_sprint {
                         // Don't bump for the sprint being edited (it's staying active)
                         if editing_id != Some(old_sprint.id) {
                             let _ = self.db.bump_carry_count_for_sprint(old_sprint.id);
+                            Some(old_sprint.id)
+                        } else {
+                            None
                         }
+                    } else {
+                        None
                     }
-                }
+                } else {
+                    None
+                };
 
                 let result = if let Some(id) = editing_id {
-                    self.db.update_sprint(id, &name, start, end, active)
+                    self.db.update_sprint(id, &name, start, end, active).map(|_| id)
                 } else {
-                    self.db.create_sprint(&name, start, end, active).map(|_| ())
+                    self.db.create_sprint(&name, start, end, active)
                 };
+
+                // Move incomplete issues from the old sprint into the new one
+                let carry_msg = if let (Ok(new_sprint_id), Some(old_id)) = (result.as_ref(), old_sprint_id_for_carry) {
+                    let moved = self.db.move_incomplete_issues_to_sprint(old_id, *new_sprint_id).unwrap_or(0);
+                    if moved > 0 {
+                        format!("Sprint saved. {moved} unfinished issue(s) carried forward.")
+                    } else {
+                        "Sprint saved.".to_string()
+                    }
+                } else {
+                    "Sprint saved.".to_string()
+                };
+
+                let result = result.map(|_| ());
 
                 match result {
                     Err(e) => self.set_status(format!("Error: {e}")),
@@ -2424,7 +2455,7 @@ impl App {
                         if self.view == View::SprintHistory {
                             self.load_sprint_history();
                         }
-                        self.set_status("Sprint saved.");
+                        self.set_status(carry_msg);
                     }
                 }
                 return;

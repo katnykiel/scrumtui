@@ -8,12 +8,11 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::models::{format_sp, Status};
+use crate::models::{format_sp, Sprint, Status};
 use crate::ui::backlog::{status_color, status_symbol, trunc};
 use crate::ui::popup::render_burnup_chart;
 
 pub fn render(f: &mut Frame, app: &App, area: Rect) {
-    // Split horizontally: left = sprint list (~28 cols), right = detail + chart
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(28), Constraint::Min(10)])
@@ -39,17 +38,13 @@ fn render_sprint_list(f: &mut Frame, app: &App, area: Rect) {
                 sprint.start_date.format("%b %d"),
                 sprint.end_date.format("%b %d, %Y"),
             );
-
             let name_style = if is_sel {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else if sprint.is_active {
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-
             ListItem::new(vec![
                 Line::from(vec![
                     Span::styled(format!("{pointer}{active_marker} "), Style::default().fg(Color::Magenta)),
@@ -60,12 +55,6 @@ fn render_sprint_list(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let empty_hint = if app.history_sprints.is_empty() {
-        "  No sprints yet."
-    } else {
-        ""
-    };
-
     let list = List::new(items)
         .block(
             Block::default()
@@ -73,10 +62,7 @@ fn render_sprint_list(f: &mut Frame, app: &App, area: Rect) {
                 .border_type(BorderType::Rounded)
                 .title(Line::from(vec![
                     Span::raw(" "),
-                    Span::styled(
-                        "sprints",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled("sprints", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                     Span::raw(" "),
                 ]))
                 .title_bottom(Line::from(Span::styled(
@@ -89,7 +75,7 @@ fn render_sprint_list(f: &mut Frame, app: &App, area: Rect) {
 
     if app.history_sprints.is_empty() {
         f.render_widget(
-            Paragraph::new(empty_hint)
+            Paragraph::new("  No sprints yet.")
                 .style(Style::default().fg(Color::DarkGray))
                 .block(
                     Block::default()
@@ -97,10 +83,7 @@ fn render_sprint_list(f: &mut Frame, app: &App, area: Rect) {
                         .border_type(BorderType::Rounded)
                         .title(Line::from(vec![
                             Span::raw(" "),
-                            Span::styled(
-                                "sprints",
-                                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                            ),
+                            Span::styled("sprints", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                             Span::raw(" "),
                         ]))
                         .border_style(Style::default().fg(Color::Rgb(80, 80, 120))),
@@ -133,44 +116,59 @@ fn render_sprint_detail(f: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    // Split right pane: left = stats + issue list, right = burnup chart
-    // Chart gets ~40% of space, minimum 36 cols to be useful
-    let right_chart_w = ((area.width as usize) * 2 / 5).max(36).min(area.width as usize - 20) as u16;
+    // Right column: burnup chart (top) + analysis panel (bottom, ~12 rows)
+    let right_col_w = ((area.width as usize) * 2 / 5).max(38).min(area.width as usize - 20) as u16;
     let h_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(20), Constraint::Length(right_chart_w)])
+        .constraints([Constraint::Min(20), Constraint::Length(right_col_w)])
         .split(area);
 
     let issues = &app.history_issues;
 
-    // ── Left: stats header (6 rows) + issue list (fill) ───────────────────────
+    // Left: stats header (6 rows) + issue list (fill)
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(6), Constraint::Min(1)])
         .split(h_chunks[0]);
 
-    render_stats_header(f, app, left_chunks[0], sprint, issues);
+    render_stats_header(f, left_chunks[0], sprint, issues);
     render_issue_list(f, issues, left_chunks[1]);
 
-    // ── Right: burnup chart ───────────────────────────────────────────────────
+    // Right: burnup chart (top) + analysis panel (bottom)
+    let analysis_h = 13u16.min(h_chunks[1].height.saturating_sub(8));
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(6), Constraint::Length(analysis_h)])
+        .split(h_chunks[1]);
+
     let sprint_issue_refs: Vec<&crate::models::Issue> = issues.iter().collect();
-    render_burnup_chart(f, sprint.start_date, sprint.end_date, &sprint_issue_refs, h_chunks[1]);
+    render_burnup_chart(f, sprint.start_date, sprint.end_date, &sprint_issue_refs, right_chunks[0]);
+    render_analysis_panel(f, app, right_chunks[1], sprint, issues);
+}
+
+/// Effective sprint duration in days: actual duration capped at 7 days.
+/// Sprints recorded with start == end (1 day) are treated as 7-day sprints
+/// for the purpose of burndown/velocity display, since they were almost certainly
+/// created without setting a real end date.
+fn effective_duration(sprint: &Sprint) -> i64 {
+    let raw = (sprint.end_date - sprint.start_date).num_days() + 1;
+    if raw <= 1 { 7 } else { raw.min(7) }
 }
 
 fn render_stats_header(
     f: &mut Frame,
-    _app: &App,
     area: Rect,
-    sprint: &crate::models::Sprint,
+    sprint: &Sprint,
     issues: &[crate::models::Issue],
 ) {
-    let total_issues: usize = issues.len();
+    let total_issues = issues.len();
     let done_issues = issues.iter().filter(|i| i.status == Status::Done).count();
     let total_sp: f64 = issues.iter().map(|i| i.story_points).sum();
     let done_sp: f64 = issues.iter().filter(|i| i.status == Status::Done).map(|i| i.story_points).sum();
     let today = Local::now().date_naive();
-    let duration_days = (sprint.end_date - sprint.start_date).num_days() + 1;
+    let duration_days = effective_duration(sprint);
     let elapsed_days = (today - sprint.start_date).num_days().clamp(0, duration_days);
+
     let status_label = if sprint.is_active {
         Span::styled("  ACTIVE", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
     } else if today < sprint.start_date {
@@ -182,40 +180,29 @@ fn render_stats_header(
     let header_lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled(
-                format!("  {} ", sprint.name),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(format!("  {} ", sprint.name), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             status_label,
         ]),
-        Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                format!(
-                    "{} → {}  ({} days)",
-                    sprint.start_date.format("%Y-%m-%d"),
-                    sprint.end_date.format("%Y-%m-%d"),
-                    duration_days,
-                ),
-                Style::default().fg(Color::DarkGray),
+        Line::from(Span::styled(
+            format!(
+                "  {} → {}  ({} days)",
+                sprint.start_date.format("%Y-%m-%d"),
+                sprint.end_date.format("%Y-%m-%d"),
+                duration_days,
             ),
-        ]),
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(vec![
+            Span::styled(format!("  {done_issues}/{total_issues} issues done"), Style::default().fg(Color::Gray)),
             Span::styled(
-                format!("  {done_issues}/{total_issues} issues done"),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled(
-                format!("   {}/{}sp completed", format_sp(done_sp), format_sp(total_sp)),
+                format!("   {}/{}sp done", format_sp(done_sp), format_sp(total_sp)),
                 Style::default().fg(Color::Magenta),
             ),
         ]),
-        Line::from(vec![
-            Span::styled(
-                format!("  Day {elapsed_days}/{duration_days}"),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
+        Line::from(Span::styled(
+            format!("  Day {elapsed_days}/{duration_days}"),
+            Style::default().fg(Color::DarkGray),
+        )),
     ];
 
     f.render_widget(
@@ -225,10 +212,7 @@ fn render_stats_header(
                 .border_type(BorderType::Rounded)
                 .title(Line::from(vec![
                     Span::raw(" "),
-                    Span::styled(
-                        "sprint history",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled("sprint history", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                     Span::raw(" "),
                 ]))
                 .border_style(Style::default().fg(Color::Rgb(80, 80, 120))),
@@ -246,68 +230,271 @@ fn render_issue_list(f: &mut Frame, issues: &[crate::models::Issue], area: Rect)
         .map(|issue| {
             let sym = status_symbol(&issue.status);
             let sc = status_color(&issue.status);
-            let due = issue
-                .due_date
-                .map(|d| format!("  {}", d.format("%b %d")))
-                .unwrap_or_default();
+            let due = issue.due_date.map(|d| format!("  {}", d.format("%b %d"))).unwrap_or_default();
             Line::from(vec![
                 Span::styled(format!("  {sym} "), Style::default().fg(sc)),
                 Span::styled(
                     format!("{:<width$}", trunc(&issue.title, title_max), width = title_max),
-                    if issue.status == Status::Done {
-                        Style::default().fg(Color::DarkGray)
-                    } else {
-                        Style::default()
-                    },
+                    if issue.status == Status::Done { Style::default().fg(Color::DarkGray) } else { Style::default() },
                 ),
-                Span::styled(
-                    format!("  #{}", issue.id),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("  {:>4}sp", format_sp(issue.story_points)),
-                    Style::default().fg(Color::Magenta),
-                ),
-                Span::styled(
-                    format!("  {:<4}", issue.status.short()),
-                    Style::default().fg(sc),
-                ),
-                Span::styled(
-                    format!("  {:<12}", trunc(&issue.epic, 12)),
-                    Style::default().fg(Color::Cyan),
-                ),
+                Span::styled(format!("  #{}", issue.id), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("  {:>4}sp", format_sp(issue.story_points)), Style::default().fg(Color::Magenta)),
+                Span::styled(format!("  {:<4}", issue.status.short()), Style::default().fg(sc)),
+                Span::styled(format!("  {:<12}", trunc(&issue.epic, 12)), Style::default().fg(Color::Cyan)),
                 Span::styled(due, Style::default().fg(Color::DarkGray)),
-            ])
-            .into()
+            ]).into()
         })
         .map(|line: Line| ListItem::new(line))
         .collect();
 
     let hint = " [1]backlog  [2]kanban  [3]gantt  [4]history  [?]help ";
-
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(Line::from(Span::styled(
-            " issues ",
-            Style::default().fg(Color::DarkGray),
-        )))
-        .title_bottom(Line::from(Span::styled(
-            hint,
-            Style::default().fg(Color::DarkGray),
-        )))
+        .title(Line::from(Span::styled(" issues ", Style::default().fg(Color::DarkGray))))
+        .title_bottom(Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))))
         .border_style(Style::default().fg(Color::Rgb(60, 60, 90)));
 
     if issues.is_empty() {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "  No issues in this sprint.",
-                Style::default().fg(Color::DarkGray),
-            )))
-            .block(block),
+            Paragraph::new(Span::styled("  No issues in this sprint.", Style::default().fg(Color::DarkGray)))
+                .block(block),
             area,
         );
     } else {
         f.render_widget(List::new(list_items).block(block), area);
     }
+}
+
+/// Per-sprint done SP aligned to `history_sprints` order (newest first).
+fn done_sp_series(app: &App) -> Vec<f64> {
+    app.history_sprints
+        .iter()
+        .map(|s| {
+            app.history_sprint_stats
+                .iter()
+                .find(|(id, _, _)| *id == s.id)
+                .map(|(_, _, done)| *done)
+                .unwrap_or(0.0)
+        })
+        .collect()
+}
+
+fn render_analysis_panel(
+    f: &mut Frame,
+    app: &App,
+    area: Rect,
+    sprint: &Sprint,
+    issues: &[crate::models::Issue],
+) {
+    if area.height < 4 {
+        return;
+    }
+
+    let series = done_sp_series(app);
+
+    // ── Velocity: only sprints that completed BEFORE this sprint's end date ───
+    // This makes the number different per-sprint (historic context, not current).
+    let prior_done: Vec<f64> = app
+        .history_sprints
+        .iter()
+        .zip(series.iter())
+        .filter(|(s, _)| !s.is_active && s.end_date < sprint.end_date)
+        .map(|(_, sp)| *sp)
+        .collect(); // history_sprints is newest-first, so prior_done[0] is the most recent prior
+
+    let window = prior_done.len().min(5);
+    let velocity_avg: Option<f64> = if window == 0 {
+        None
+    } else {
+        Some(prior_done[..window].iter().sum::<f64>() / window as f64)
+    };
+
+    // Trend over prior sprints: newest 2 vs the 2 before that
+    let trend = if prior_done.len() >= 4 {
+        let r = (prior_done[0] + prior_done[1]) / 2.0;
+        let o = (prior_done[2] + prior_done[3]) / 2.0;
+        if r > o * 1.05 { ("↑", Color::Green) } else if r < o * 0.95 { ("↓", Color::Red) } else { ("→", Color::DarkGray) }
+    } else {
+        ("–", Color::DarkGray)
+    };
+
+    // ── This sprint ───────────────────────────────────────────────────────────
+    let total_sp: f64 = issues.iter().map(|i| i.story_points).sum();
+    let done_sp: f64 = issues.iter().filter(|i| i.status == Status::Done).map(|i| i.story_points).sum();
+    let pct = if total_sp > 0.0 { done_sp / total_sp * 100.0 } else { 0.0 };
+
+    // SP added mid-sprint: issues created strictly after sprint.start_date
+    let mid_sp: f64 = issues
+        .iter()
+        .filter(|i| i.created_at.date() > sprint.start_date)
+        .map(|i| i.story_points)
+        .sum();
+
+    // ── Cycle time (IP → Done) ────────────────────────────────────────────────
+    let timed: Vec<(f64, f64)> = issues
+        .iter()
+        .filter_map(|i| {
+            let (Some(s), Some(c)) = (i.started_at, i.completed_at) else { return None };
+            let h = (c - s).num_minutes() as f64 / 60.0;
+            if h >= 0.0 { Some((i.story_points, h)) } else { None }
+        })
+        .collect();
+
+    let avg_hours: Option<f64> = if timed.is_empty() {
+        None
+    } else {
+        Some(timed.iter().map(|(_, h)| h).sum::<f64>() / timed.len() as f64)
+    };
+
+    let hours_per_sp: Option<f64> = if timed.is_empty() {
+        None
+    } else {
+        let sp_sum: f64 = timed.iter().map(|(sp, _)| sp).sum();
+        let h_sum: f64 = timed.iter().map(|(_, h)| h).sum();
+        if sp_sum > 0.0 { Some(h_sum / sp_sum) } else { None }
+    };
+
+    // ── Recommended starting SP ───────────────────────────────────────────────
+    // Take the lower of: velocity avg and the 25th-percentile of prior done SP.
+    // Using p25 means "start with an amount you can reliably finish".
+    let safe_target: Option<f64> = if prior_done.len() >= 3 {
+        let mut sorted = prior_done[..prior_done.len().min(10)].to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p25_idx = (sorted.len() as f64 * 0.25) as usize;
+        Some(sorted[p25_idx].min(velocity_avg.unwrap_or(f64::MAX)))
+    } else {
+        velocity_avg
+    };
+
+    // ── Velocity sparkline (oldest → newest, only sprints up to and including this one) ──
+    // This makes the sparkline show the trajectory leading up to the selected sprint,
+    // so it changes as you navigate between sprints.
+    let mut spark_vals: Vec<f64> = app
+        .history_sprints
+        .iter()
+        .zip(series.iter())
+        .filter(|(s, _)| !s.is_active && s.end_date <= sprint.end_date)
+        .map(|(_, sp)| *sp)
+        .collect::<Vec<_>>();
+    spark_vals.reverse(); // oldest → newest left to right
+
+    // ── Build lines ───────────────────────────────────────────────────────────
+    let fmt_hours = |h: f64| -> String {
+        if h < 24.0 { format!("{h:.1}h") } else { format!("{:.1}d", h / 24.0) }
+    };
+
+    let mut lines: Vec<Line> = vec![Line::from("")];
+
+    // Velocity (based on sprints before this one)
+    let vel_str = velocity_avg.map(|v| format!("{v:.1}sp")).unwrap_or_else(|| "n/a".into());
+    let window_label = if window == 0 {
+        "  no prior data".to_string()
+    } else {
+        format!(" avg of {window} prior sprint{}", if window == 1 { "" } else { "s" })
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  velocity   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(vel_str, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(window_label, Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("  {}", trend.0), Style::default().fg(trend.1).add_modifier(Modifier::BOLD)),
+    ]));
+
+    // Completion rate for this sprint
+    let pct_color = if pct >= 80.0 { Color::Green } else if pct >= 50.0 { Color::Yellow } else { Color::Red };
+    lines.push(Line::from(vec![
+        Span::styled("  completed  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{pct:.0}%"), Style::default().fg(pct_color).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  ({}/{}sp)", format_sp(done_sp), format_sp(total_sp)), Style::default().fg(Color::DarkGray)),
+    ]));
+
+    // Safe starting SP recommendation
+    if let Some(target) = safe_target {
+        let (hint, col) = if sprint.is_active {
+            // for the active sprint: tell the user how their commitment compares
+            if total_sp <= target * 1.1 {
+                ("commitment looks good", Color::Green)
+            } else {
+                ("over-committed vs history", Color::Yellow)
+            }
+        } else {
+            // for past sprints: show how the start load compared to what was safe
+            if total_sp <= target * 1.1 {
+                ("was within safe range", Color::DarkGray)
+            } else {
+                ("started above safe range", Color::Yellow)
+            }
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  safe start  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("≤{}sp", format_sp(target)), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {hint}"), Style::default().fg(col)),
+        ]));
+    }
+
+    // Scope creep
+    if total_sp > 0.0 {
+        let creep_color = if mid_sp > total_sp * 0.2 { Color::Yellow } else { Color::DarkGray };
+        lines.push(Line::from(vec![
+            Span::styled("  scope       ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}sp start", format_sp(total_sp - mid_sp)), Style::default().fg(Color::Gray)),
+            Span::styled(
+                if mid_sp > 0.0 { format!("  +{}sp added", format_sp(mid_sp)) } else { "  no additions".into() },
+                Style::default().fg(creep_color),
+            ),
+        ]));
+    }
+
+    // Cycle time
+    if let Some(h) = avg_hours {
+        let mut parts = vec![
+            Span::styled("  cycle time  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(fmt_hours(h), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(" avg IP→done", Style::default().fg(Color::DarkGray)),
+        ];
+        if let Some(hsp) = hours_per_sp {
+            parts.push(Span::styled(format!("  {}/sp", fmt_hours(hsp)), Style::default().fg(Color::DarkGray)));
+        }
+        lines.push(Line::from(parts));
+    }
+
+    // Velocity sparkline — selected sprint is always the last (rightmost) bar
+    if spark_vals.len() >= 1 {
+        let max_v = spark_vals.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
+        const BARS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+        let last_idx = spark_vals.len().saturating_sub(1);
+
+        let spark_spans: Vec<Span> = spark_vals
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let bar = BARS[((v / max_v) * 7.0).round() as usize % 8];
+                if i == last_idx {
+                    // Selected sprint: bright white so it stands out
+                    Span::styled(bar, Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+                } else {
+                    Span::styled(bar, Style::default().fg(Color::Rgb(60, 120, 160)))
+                }
+            })
+            .collect();
+
+        let mut spark_line = vec![Span::styled("  history     ", Style::default().fg(Color::DarkGray))];
+        spark_line.extend(spark_spans);
+        lines.push(Line::from(spark_line));
+    }
+
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled("analysis", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    Span::raw(" "),
+                ]))
+                .border_style(Style::default().fg(Color::Rgb(80, 60, 100))),
+        ),
+        area,
+    );
 }

@@ -52,12 +52,12 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 
     let hint = if has_subs {
         if app.kanban_panel == 1 {
-            " [e] edit  [h/l] status  [Tab] parent  [</>] cycle  [u] undo  [?] help "
+            " [e] edit  [^H/^L] move  [Tab] parent  [</>] cycle  [u] undo  [?] help "
         } else {
-            " [n] new  [e] edit  [h/l] status  [Tab] subs  [[/]] col  [u] undo  [?] help "
+            " [n] new  [e] edit  [h/l] col  [^H/^L] move  [Tab] subs  [u] undo  [?] help "
         }
     } else {
-        " [n] new  [e] edit  [h/l] status  [/] search  [[/]] col  [u] undo  [?] help "
+        " [n] new  [e] edit  [h/l] col  [^H/^L] move issue  [/] search  [u] undo  [?] help "
     };
 
     let outer = Block::default()

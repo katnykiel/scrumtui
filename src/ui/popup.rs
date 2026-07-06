@@ -140,6 +140,9 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
             // Status: show current value with dropdown hint
             let arrow = if is_focused { "  ▼" } else { "" };
             format!(" {}{}", values[i], arrow)
+        } else if i == 5 {
+            // Description: use real terminal cursor, no block cursor char
+            format!(" {}", values[i])
         } else {
             let cursor = if is_focused { "▌" } else { "" };
             format!(" {}{}", values[i], cursor)
@@ -178,12 +181,19 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
             // Description: multi-line with word wrap.
             // When focused, use the terminal's real cursor instead of REVERSED highlight
             // (REVERSED on a multi-line block looks broken in dark/night-mode terminals).
+            // Iterate over the raw description directly — NOT value_display which already
+            // has a leading space that would double-up when we prefix each line with " ".
             let mut desc_lines: Vec<Line> = vec![
                 Line::from(Span::styled(format!(" {label}"), label_style)),
             ];
-            for text_line in value_display.split('\n') {
+            let desc_src = if is_focused {
+                form.description.clone()
+            } else {
+                form.description.replace('\n', "  ·  ")
+            };
+            for text_line in desc_src.split('\n') {
                 desc_lines.push(Line::from(Span::styled(
-                    format!(" {}", text_line),
+                    format!(" {text_line}"),
                     if is_focused { Style::default() } else { value_style },
                 )));
             }
@@ -201,13 +211,16 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
                     ),
                 field_areas[i],
             );
-            // Place the real terminal cursor at the end of the last content line
+            // Place the real terminal cursor at the end of the last content line.
+            // Use the raw description (not value_display which has extra prefix/cursor chars).
             if is_focused {
-                let last_line = value_display.split('\n').last().unwrap_or("");
-                let last_idx = value_display.split('\n').count().saturating_sub(1);
-                // +1 for label row, area y offset; +1 inside block indent, +1 for " " prefix
-                let cx = (field_areas[i].x + 1 + 1 + last_line.chars().count() as u16)
+                let raw = &form.description;
+                let last_line_raw = raw.split('\n').last().unwrap_or("");
+                let last_idx = raw.split('\n').count().saturating_sub(1);
+                // +1 for the single space prefix added in format!(" {}", text_line)
+                let cx = (field_areas[i].x + 1 + last_line_raw.chars().count() as u16)
                     .min(field_areas[i].x + field_areas[i].width.saturating_sub(2));
+                // +1 for the label row at the top of the field
                 let cy = (field_areas[i].y + 1 + last_idx as u16)
                     .min(field_areas[i].y + field_areas[i].height.saturating_sub(1));
                 f.set_cursor_position((cx, cy));
@@ -1101,7 +1114,7 @@ fn render_help(f: &mut Frame) {
         sep(),
         hdr("GLOBAL"),
         key("j / k", "Navigate up / down"),
-        key("h / l", "Advance / regress status"),
+        key("h / l", "Advance / regress status  (backlog)"),
         key("e", "Edit selected issue"),
         key("n", "New issue"),
         key("u  /  ?", "Undo  /  Help"),
@@ -1115,8 +1128,8 @@ fn render_help(f: &mut Frame) {
         key("/", "Search"),
         sep(),
         hdr("KANBAN"),
-        key("[ / ]", "Switch column left / right"),
-        key("h / l", "Regress / advance status"),
+        key("h / l", "Navigate column left / right"),
+        key("Ctrl-H / Ctrl-L", "Move issue to prev / next column"),
         key("Tab", "Parent ↔ subtask panel"),
         key("< / >", "Cycle parent in subtask panel"),
         sep(),

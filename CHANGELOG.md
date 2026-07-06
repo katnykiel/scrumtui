@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.0] — 2026-07-06
+
+### Added
+- **Sprint carry-forward**: when a new sprint is activated, all TODO/IN PROGRESS issues from the old sprint are automatically moved into the new sprint (in addition to having their `carry_count` incremented). A status message reports how many issues were carried forward.
+- **Sprint history analysis panel**: a new panel appears below the burnup chart in the history view showing per-sprint contextual stats — velocity (avg done SP from prior sprints only, so it changes as you navigate), completion %, scope creep (SP added mid-sprint vs starting load), avg IP→Done cycle time with hours/SP, a velocity sparkline (oldest→selected, rightmost bar always the selected sprint), and a "safe start" recommendation showing the max SP to commit to based on p25 of historical done SP.
+- **Relative velocity**: all history analysis figures are now computed relative to the selected sprint — velocity uses only sprints that ended before it, and the sparkline grows as you navigate forward in time, so earlier sprints show their historical context rather than current averages.
+
+### Changed
+- **Kanban keybinds** (breaking): `h`/`l` now navigate between columns (left/right cursor movement); `Ctrl-H`/`Ctrl-L` now move the selected issue to the previous/next column. Previously this was the opposite.
+- **Description field cursor**: fixed a double-space prefix bug where the field's `value_display` already contained a leading space and the render loop prepended another, causing the real terminal cursor to sit two characters past the end of the text. The render loop now iterates over the raw description directly.
+- **Sprint duration display**: sprint durations are now capped at 7 days in the stats header and day counter. Sprints recorded with `start_date == end_date` (a common data artifact from not setting an end date) are treated as 7-day sprints for display and analysis purposes.
+- **"vs avg" row replaced**: the opaque "vs avg" percentage line is replaced by a "safe start" recommendation — `≤Xsp` derived from the p25 of prior done SP, with a contextual label (`commitment looks good` / `over-committed vs history` for the active sprint; `was within safe range` / `started above safe range` for past sprints).
+- Help overlay, hint bars, and README updated to reflect the new kanban keybinds.
+
+---
+
 ## [1.1.0] — 2026-06-22
 
 ### Changed

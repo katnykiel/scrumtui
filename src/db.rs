@@ -624,6 +624,34 @@ impl Db {
         Ok(())
     }
 
+    /// Move all TODO/IN_PROGRESS issues from one sprint to another.
+    /// Returns the number of issues moved.
+    pub fn move_incomplete_issues_to_sprint(&self, from_sprint_id: i64, to_sprint_id: i64) -> Result<usize> {
+        let n = self.conn.execute(
+            "UPDATE issues SET sprint_id = ?1, updated_at = ?2
+             WHERE sprint_id = ?3 AND status IN ('TODO', 'IN_PROGRESS') AND deleted_at IS NULL",
+            params![to_sprint_id, now_str(), from_sprint_id],
+        )?;
+        Ok(n)
+    }
+
+    /// Return aggregate (sprint_id, total_sp, done_sp) for all sprints — lightweight summary
+    /// used for velocity and trend analysis in the history view.
+    pub fn get_all_sprint_summary(&self) -> Result<Vec<(i64, f64, f64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sprint_id,
+                    SUM(story_points),
+                    SUM(CASE WHEN status = 'DONE' THEN story_points ELSE 0.0 END)
+             FROM issues
+             WHERE sprint_id IS NOT NULL AND parent_id IS NULL AND deleted_at IS NULL
+             GROUP BY sprint_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?))
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn get_active_sprint(&self) -> Result<Option<Sprint>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, start_date, end_date, is_active, created_at
