@@ -6,6 +6,25 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.0] — 2026-07-10
+
+### Added
+- **Yank to clipboard** (`y` in backlog): copy issue title, description, and subtask tree (with status checkboxes) to clipboard via `pbcopy`.
+- **Gantt epic detail navigation**: enter the epic popup (`e`/`Enter`) and use `j`/`k`/`g`/`G` to navigate issues, press `Enter` to edit.
+- **Sprint history navigation**: `g`/`G` to jump to first/last sprint; `Ctrl-D`/`Ctrl-U` for page up/down (both now work in backlog, gantt, and history views).
+- **Auto-fix short sprints**: when you open the history view (`4`), any past sprints shorter than 7 days are automatically back-dated to exactly 7 days (start = end − 6), with no overlaps.
+- **Velocity per day**: analysis panel now shows sp/day instead of raw story points — computed as `done_sp / sprint_duration` averaged over up to 5 prior sprints; safe start is scaled to the current sprint's actual duration.
+
+### Changed
+- **Status field in issue form**: replaced the dropdown with `h`/`l` cycling (no more arrow keys or Enter to open). Shows one status at a time: TODO ↔ IN PROGRESS ↔ DONE.
+- **Analysis panel cleanup**: removed "cycle time" row (avg IP→Done hours/SP); removed "done sp" sparkline; simplified "safe start" and "scope" to show just the numbers without trailing hints.
+- **Sprint duration display**: removed the 7-day cap — sprints now display their real duration. "Day X/Y" progress is only shown for the active sprint.
+
+### Fixed
+- **Gantt popup scrolling**: implemented selection-based navigation (sel) separate from scroll offset, so j/k highlight issues instead of just paging; selection auto-scrolls to stay visible.
+
+---
+
 ## [1.4.0] — 2026-07-06
 
 ### Added

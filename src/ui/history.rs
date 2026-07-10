@@ -66,7 +66,7 @@ fn render_sprint_list(f: &mut Frame, app: &App, area: Rect) {
                     Span::raw(" "),
                 ]))
                 .title_bottom(Line::from(Span::styled(
-                    " [j/k] navigate  [e] rename  [d] delete ",
+                    " [j/k/g/G] navigate  [^d/^u] page  [e] rename  [d] delete ",
                     Style::default().fg(Color::DarkGray),
                 )))
                 .border_style(Style::default().fg(Color::Rgb(80, 80, 120))),
@@ -146,13 +146,12 @@ fn render_sprint_detail(f: &mut Frame, app: &App, area: Rect) {
     render_analysis_panel(f, app, right_chunks[1], sprint, issues);
 }
 
-/// Effective sprint duration in days: actual duration capped at 7 days.
-/// Sprints recorded with start == end (1 day) are treated as 7-day sprints
-/// for the purpose of burndown/velocity display, since they were almost certainly
-/// created without setting a real end date.
+/// Effective sprint duration in days.
+/// Sprints recorded with start == end (1 day) are treated as 7-day sprints,
+/// since they were almost certainly created without setting a real end date.
 fn effective_duration(sprint: &Sprint) -> i64 {
     let raw = (sprint.end_date - sprint.start_date).num_days() + 1;
-    if raw <= 1 { 7 } else { raw.min(7) }
+    if raw <= 1 { 7 } else { raw }
 }
 
 fn render_stats_header(
@@ -199,10 +198,14 @@ fn render_stats_header(
                 Style::default().fg(Color::Magenta),
             ),
         ]),
-        Line::from(Span::styled(
-            format!("  Day {elapsed_days}/{duration_days}"),
-            Style::default().fg(Color::DarkGray),
-        )),
+        if sprint.is_active {
+            Line::from(Span::styled(
+                format!("  Day {elapsed_days}/{duration_days}"),
+                Style::default().fg(Color::DarkGray),
+            ))
+        } else {
+            Line::from("")
+        },
     ];
 
     f.render_widget(
@@ -293,27 +296,33 @@ fn render_analysis_panel(
 
     let series = done_sp_series(app);
 
-    // ── Velocity: only sprints that completed BEFORE this sprint's end date ───
-    // This makes the number different per-sprint (historic context, not current).
-    let prior_done: Vec<f64> = app
+    // ── Velocity per day: sprints completed BEFORE this sprint's end date ─────
+    // Collect (done_sp, duration_days) pairs; newest-first order.
+    let prior_data: Vec<(f64, i64)> = app
         .history_sprints
         .iter()
         .zip(series.iter())
         .filter(|(s, _)| !s.is_active && s.end_date < sprint.end_date)
-        .map(|(_, sp)| *sp)
-        .collect(); // history_sprints is newest-first, so prior_done[0] is the most recent prior
+        .map(|(s, sp)| (*sp, effective_duration(s)))
+        .collect();
 
-    let window = prior_done.len().min(5);
-    let velocity_avg: Option<f64> = if window == 0 {
+    let window = prior_data.len().min(5);
+
+    // sp/day for each prior sprint
+    let prior_spd: Vec<f64> = prior_data.iter()
+        .map(|(sp, days)| if *days > 0 { sp / *days as f64 } else { 0.0 })
+        .collect();
+
+    let velocity_spd: Option<f64> = if window == 0 {
         None
     } else {
-        Some(prior_done[..window].iter().sum::<f64>() / window as f64)
+        Some(prior_spd[..window].iter().sum::<f64>() / window as f64)
     };
 
-    // Trend over prior sprints: newest 2 vs the 2 before that
-    let trend = if prior_done.len() >= 4 {
-        let r = (prior_done[0] + prior_done[1]) / 2.0;
-        let o = (prior_done[2] + prior_done[3]) / 2.0;
+    // Trend over prior sprints: newest 2 sp/day vs the 2 before that
+    let trend = if prior_spd.len() >= 4 {
+        let r = (prior_spd[0] + prior_spd[1]) / 2.0;
+        let o = (prior_spd[2] + prior_spd[3]) / 2.0;
         if r > o * 1.05 { ("↑", Color::Green) } else if r < o * 0.95 { ("↓", Color::Red) } else { ("→", Color::DarkGray) }
     } else {
         ("–", Color::DarkGray)
@@ -323,6 +332,7 @@ fn render_analysis_panel(
     let total_sp: f64 = issues.iter().map(|i| i.story_points).sum();
     let done_sp: f64 = issues.iter().filter(|i| i.status == Status::Done).map(|i| i.story_points).sum();
     let pct = if total_sp > 0.0 { done_sp / total_sp * 100.0 } else { 0.0 };
+    let sprint_days = effective_duration(sprint);
 
     // SP added mid-sprint: issues created strictly after sprint.start_date
     let mid_sp: f64 = issues
@@ -331,76 +341,34 @@ fn render_analysis_panel(
         .map(|i| i.story_points)
         .sum();
 
-    // ── Cycle time (IP → Done) ────────────────────────────────────────────────
-    let timed: Vec<(f64, f64)> = issues
-        .iter()
-        .filter_map(|i| {
-            let (Some(s), Some(c)) = (i.started_at, i.completed_at) else { return None };
-            let h = (c - s).num_minutes() as f64 / 60.0;
-            if h >= 0.0 { Some((i.story_points, h)) } else { None }
-        })
-        .collect();
-
-    let avg_hours: Option<f64> = if timed.is_empty() {
-        None
-    } else {
-        Some(timed.iter().map(|(_, h)| h).sum::<f64>() / timed.len() as f64)
-    };
-
-    let hours_per_sp: Option<f64> = if timed.is_empty() {
-        None
-    } else {
-        let sp_sum: f64 = timed.iter().map(|(sp, _)| sp).sum();
-        let h_sum: f64 = timed.iter().map(|(_, h)| h).sum();
-        if sp_sum > 0.0 { Some(h_sum / sp_sum) } else { None }
-    };
-
     // ── Recommended starting SP ───────────────────────────────────────────────
-    // Take the lower of: velocity avg and the 25th-percentile of prior done SP.
-    // Using p25 means "start with an amount you can reliably finish".
-    let safe_target: Option<f64> = if prior_done.len() >= 3 {
-        let mut sorted = prior_done[..prior_done.len().min(10)].to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let p25_idx = (sorted.len() as f64 * 0.25) as usize;
-        Some(sorted[p25_idx].min(velocity_avg.unwrap_or(f64::MAX)))
+    // p25 of prior done-sp-per-day * this sprint's duration → reliable SP target.
+    let safe_target: Option<f64> = if prior_spd.len() >= 3 {
+        let mut sorted_spd = prior_spd[..prior_spd.len().min(10)].to_vec();
+        sorted_spd.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p25_idx = (sorted_spd.len() as f64 * 0.25) as usize;
+        let p25_spd = sorted_spd[p25_idx].min(velocity_spd.unwrap_or(f64::MAX));
+        Some(p25_spd * sprint_days as f64)
     } else {
-        velocity_avg
+        velocity_spd.map(|v| v * sprint_days as f64)
     };
-
-    // ── Velocity sparkline (oldest → newest, only sprints up to and including this one) ──
-    // This makes the sparkline show the trajectory leading up to the selected sprint,
-    // so it changes as you navigate between sprints.
-    let mut spark_vals: Vec<f64> = app
-        .history_sprints
-        .iter()
-        .zip(series.iter())
-        .filter(|(s, _)| !s.is_active && s.end_date <= sprint.end_date)
-        .map(|(_, sp)| *sp)
-        .collect::<Vec<_>>();
-    spark_vals.reverse(); // oldest → newest left to right
 
     // ── Build lines ───────────────────────────────────────────────────────────
-    let fmt_hours = |h: f64| -> String {
-        if h < 24.0 { format!("{h:.1}h") } else { format!("{:.1}d", h / 24.0) }
-    };
-
     let mut lines: Vec<Line> = vec![Line::from("")];
 
-    // Velocity (based on sprints before this one)
-    let vel_str = velocity_avg.map(|v| format!("{v:.1}sp")).unwrap_or_else(|| "n/a".into());
-    let window_label = if window == 0 {
-        "  no prior data".to_string()
-    } else {
-        format!(" avg of {window} prior sprint{}", if window == 1 { "" } else { "s" })
-    };
+    // Velocity as sp/day
+    let vel_str = velocity_spd
+        .map(|v| format!("{v:.2}sp/day"))
+        .unwrap_or_else(|| "n/a".into());
+    let no_data_label = if window == 0 { "  no prior data" } else { "" };
     lines.push(Line::from(vec![
         Span::styled("  velocity   ", Style::default().fg(Color::DarkGray)),
         Span::styled(vel_str, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(window_label, Style::default().fg(Color::DarkGray)),
+        Span::styled(no_data_label, Style::default().fg(Color::DarkGray)),
         Span::styled(format!("  {}", trend.0), Style::default().fg(trend.1).add_modifier(Modifier::BOLD)),
     ]));
 
-    // Completion rate for this sprint
+    // Completion rate
     let pct_color = if pct >= 80.0 { Color::Green } else if pct >= 50.0 { Color::Yellow } else { Color::Red };
     lines.push(Line::from(vec![
         Span::styled("  completed  ", Style::default().fg(Color::DarkGray)),
@@ -408,79 +376,23 @@ fn render_analysis_panel(
         Span::styled(format!("  ({}/{}sp)", format_sp(done_sp), format_sp(total_sp)), Style::default().fg(Color::DarkGray)),
     ]));
 
-    // Safe starting SP recommendation
+    // Safe start — just the number, color-coded green/yellow
     if let Some(target) = safe_target {
-        let (hint, col) = if sprint.is_active {
-            // for the active sprint: tell the user how their commitment compares
-            if total_sp <= target * 1.1 {
-                ("commitment looks good", Color::Green)
-            } else {
-                ("over-committed vs history", Color::Yellow)
-            }
-        } else {
-            // for past sprints: show how the start load compared to what was safe
-            if total_sp <= target * 1.1 {
-                ("was within safe range", Color::DarkGray)
-            } else {
-                ("started above safe range", Color::Yellow)
-            }
-        };
+        let col = if total_sp <= target * 1.1 { Color::Green } else { Color::Yellow };
         lines.push(Line::from(vec![
             Span::styled("  safe start  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("≤{}sp", format_sp(target)), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {hint}"), Style::default().fg(col)),
+            Span::styled(format!("≤{}sp", format_sp(target)), Style::default().fg(col).add_modifier(Modifier::BOLD)),
         ]));
     }
 
-    // Scope creep
-    if total_sp > 0.0 {
+    // Scope creep — only show if something was added mid-sprint
+    if total_sp > 0.0 && mid_sp > 0.0 {
         let creep_color = if mid_sp > total_sp * 0.2 { Color::Yellow } else { Color::DarkGray };
         lines.push(Line::from(vec![
             Span::styled("  scope       ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{}sp start", format_sp(total_sp - mid_sp)), Style::default().fg(Color::Gray)),
-            Span::styled(
-                if mid_sp > 0.0 { format!("  +{}sp added", format_sp(mid_sp)) } else { "  no additions".into() },
-                Style::default().fg(creep_color),
-            ),
+            Span::styled(format!("{}sp", format_sp(total_sp - mid_sp)), Style::default().fg(Color::Gray)),
+            Span::styled(format!("  +{}sp", format_sp(mid_sp)), Style::default().fg(creep_color)),
         ]));
-    }
-
-    // Cycle time
-    if let Some(h) = avg_hours {
-        let mut parts = vec![
-            Span::styled("  cycle time  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(fmt_hours(h), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-            Span::styled(" avg IP→done", Style::default().fg(Color::DarkGray)),
-        ];
-        if let Some(hsp) = hours_per_sp {
-            parts.push(Span::styled(format!("  {}/sp", fmt_hours(hsp)), Style::default().fg(Color::DarkGray)));
-        }
-        lines.push(Line::from(parts));
-    }
-
-    // Velocity sparkline — selected sprint is always the last (rightmost) bar
-    if spark_vals.len() >= 1 {
-        let max_v = spark_vals.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
-        const BARS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-        let last_idx = spark_vals.len().saturating_sub(1);
-
-        let spark_spans: Vec<Span> = spark_vals
-            .iter()
-            .enumerate()
-            .map(|(i, v)| {
-                let bar = BARS[((v / max_v) * 7.0).round() as usize % 8];
-                if i == last_idx {
-                    // Selected sprint: bright white so it stands out
-                    Span::styled(bar, Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
-                } else {
-                    Span::styled(bar, Style::default().fg(Color::Rgb(60, 120, 160)))
-                }
-            })
-            .collect();
-
-        let mut spark_line = vec![Span::styled("  history     ", Style::default().fg(Color::DarkGray))];
-        spark_line.extend(spark_spans);
-        lines.push(Line::from(spark_line));
     }
 
     f.render_widget(

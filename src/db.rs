@@ -723,6 +723,45 @@ impl Db {
         Ok(())
     }
 
+    /// For every past (non-active) sprint shorter than 7 days, back-date its
+    /// start_date so it spans exactly 7 days (start = end - 6).  Sprints are
+    /// processed in end_date ASC order; if extending a sprint would cause it to
+    /// overlap the previous sprint, its start is clamped to prev_end + 1 day.
+    pub fn fix_short_sprints(&self) -> Result<()> {
+        // Load all non-active sprints ordered oldest end-date first.
+        let mut stmt = self.conn.prepare(
+            "SELECT id, start_date, end_date FROM sprints WHERE is_active = 0 ORDER BY end_date ASC, id ASC",
+        )?;
+        let rows: Vec<(i64, NaiveDate, NaiveDate)> = stmt.query_map([], |row| {
+            let start = NaiveDate::parse_from_str(&row.get::<_, String>(1)?, "%Y-%m-%d")
+                .unwrap_or_else(|_| Local::now().date_naive());
+            let end = NaiveDate::parse_from_str(&row.get::<_, String>(2)?, "%Y-%m-%d")
+                .unwrap_or_else(|_| Local::now().date_naive());
+            Ok((row.get::<_, i64>(0)?, start, end))
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut prev_end: Option<NaiveDate> = None;
+        for (id, start, end) in rows {
+            let duration = (end - start).num_days() + 1;
+            if duration < 7 {
+                // Ideal: back-date to a full 7-day sprint
+                let mut new_start = end - chrono::Duration::days(6);
+                // Clamp so we don't overlap the previous sprint
+                if let Some(pe) = prev_end {
+                    if new_start <= pe {
+                        new_start = pe + chrono::Duration::days(1);
+                    }
+                }
+                self.conn.execute(
+                    "UPDATE sprints SET start_date = ?1 WHERE id = ?2",
+                    params![new_start.format("%Y-%m-%d").to_string(), id],
+                )?;
+            }
+            prev_end = Some(end);
+        }
+        Ok(())
+    }
+
     /// Delete a sprint and unlink all its issues (sets sprint_id = NULL).
     pub fn delete_sprint(&self, id: i64) -> Result<()> {
         self.conn.execute(

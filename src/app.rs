@@ -75,10 +75,6 @@ pub struct IssueForm {
     pub due_date_dropdown_open: bool,
     /// Selected row in the due-date dropdown.
     pub due_date_dropdown_sel: usize,
-    /// Whether the status picker dropdown is open.
-    pub status_dropdown_open: bool,
-    /// Selected row in the status dropdown (0=Todo 1=InProgress 2=Done).
-    pub status_dropdown_sel: usize,
     /// Subtasks (only populated when editing an existing issue).
     pub subtasks: Vec<SubtaskDraft>,
     /// Selected row in the subtask list.
@@ -106,8 +102,6 @@ impl IssueForm {
             epic_dropdown_sel: 0,
             due_date_dropdown_open: false,
             due_date_dropdown_sel: 0,
-            status_dropdown_open: false,
-            status_dropdown_sel: 0,
             subtasks: Vec::new(),
             subtask_sel: 0,
             in_subtask_list: false,
@@ -131,8 +125,6 @@ impl IssueForm {
             epic_dropdown_sel: 0,
             due_date_dropdown_open: false,
             due_date_dropdown_sel: 0,
-            status_dropdown_open: false,
-            status_dropdown_sel: 0,
             subtasks: Vec::new(),
             subtask_sel: 0,
             in_subtask_list: false,
@@ -262,12 +254,13 @@ pub enum Popup {
     ConfirmDeleteSprint(i64, String), // (sprint_id, sprint_name)
     Trash { items: Vec<Issue>, sel: usize },
     Help,
-    /// Gantt epic detail: epic name, issues list, search query, scroll offset
+    /// Gantt epic detail: epic name, issues list, search query, selected index, scroll offset
     GanttEpicDetail {
         epic: String,
         issues: Vec<Issue>,
         search: String,
         search_active: bool,
+        sel: usize,
         scroll: usize,
     },
 }
@@ -1214,6 +1207,46 @@ impl App {
             KeyCode::Char('h') => {
                 self.backlog_advance_status(-1);
             }
+            KeyCode::Char('y') => {
+                if let Some(issue) = self.selected_issue() {
+                    let subtasks: Vec<&Issue> = self.display_issues.iter()
+                        .filter(|i| i.parent_id == Some(issue.id))
+                        .collect();
+                    let mut text = format!("{}\n", issue.title);
+                    if let Some(desc) = &issue.description {
+                        if !desc.trim().is_empty() {
+                            text.push('\n');
+                            text.push_str(desc.trim());
+                            text.push('\n');
+                        }
+                    }
+                    if !subtasks.is_empty() {
+                        text.push('\n');
+                        for sub in &subtasks {
+                            text.push_str(&format!("- [{}] {}\n",
+                                match sub.status {
+                                    Status::Done => "x",
+                                    Status::InProgress => "~",
+                                    Status::Todo => " ",
+                                },
+                                sub.title
+                            ));
+                        }
+                    }
+                    use std::io::Write;
+                    let result = std::process::Command::new("pbcopy")
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                        .and_then(|mut child| {
+                            child.stdin.as_mut().unwrap().write_all(text.as_bytes())?;
+                            child.wait()
+                        });
+                    match result {
+                        Ok(_) => self.set_status(format!("Yanked \"{}\" to clipboard.", issue.title)),
+                        Err(e) => self.set_status(format!("Clipboard error: {e}")),
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1471,14 +1504,31 @@ impl App {
     fn handle_gantt_key(&mut self, key: KeyEvent) {
         let epic_count = self.epics().len();
         match key.code {
-            KeyCode::Char('j') => {
+            KeyCode::Char('j') | KeyCode::Down => {
                 if epic_count > 0 && self.gantt_sel + 1 < epic_count {
                     self.gantt_sel += 1;
                 }
             }
-            KeyCode::Char('k') => {
+            KeyCode::Char('k') | KeyCode::Up => {
                 if self.gantt_sel > 0 {
                     self.gantt_sel -= 1;
+                }
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if epic_count > 0 {
+                    self.gantt_sel = (self.gantt_sel + 10).min(epic_count - 1);
+                }
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.gantt_sel = self.gantt_sel.saturating_sub(10);
+            }
+            KeyCode::Char('g') => {
+                self.gantt_sel = 0;
+                self.gantt_scroll = 0;
+            }
+            KeyCode::Char('G') => {
+                if epic_count > 0 {
+                    self.gantt_sel = epic_count - 1;
                 }
             }
             KeyCode::Char('e') | KeyCode::Enter => {
@@ -1493,6 +1543,7 @@ impl App {
                         issues: epic_issues,
                         search: String::new(),
                         search_active: false,
+                        sel: 0,
                         scroll: 0,
                     });
                 }
@@ -1505,6 +1556,8 @@ impl App {
 
     /// Load all sprints and issues for the currently selected one.
     pub fn load_sprint_history(&mut self) {
+        // Fix any past sprints that are shorter than a week before displaying.
+        let _ = self.db.fix_short_sprints();
         self.history_sprints = self.db.get_all_sprints().unwrap_or_default();
         self.history_sel = self.history_sel.min(self.history_sprints.len().saturating_sub(1));
         self.history_sprint_stats = self.db.get_all_sprint_summary().unwrap_or_default();
@@ -1522,18 +1575,35 @@ impl App {
     fn handle_history_key(&mut self, key: KeyEvent) {
         let len = self.history_sprints.len();
         if len == 0 { return; }
+
+        let move_by = |sel: usize, delta: i64, len: usize| -> usize {
+            (sel as i64 + delta).clamp(0, len as i64 - 1) as usize
+        };
+
         match key.code {
-            KeyCode::Char('j') => {
-                if self.history_sel + 1 < len {
-                    self.history_sel += 1;
-                    self.load_history_issues();
-                }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.history_sel = move_by(self.history_sel, 1, len);
+                self.load_history_issues();
             }
-            KeyCode::Char('k') => {
-                if self.history_sel > 0 {
-                    self.history_sel -= 1;
-                    self.load_history_issues();
-                }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.history_sel = move_by(self.history_sel, -1, len);
+                self.load_history_issues();
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.history_sel = move_by(self.history_sel, 10, len);
+                self.load_history_issues();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.history_sel = move_by(self.history_sel, -10, len);
+                self.load_history_issues();
+            }
+            KeyCode::Char('g') => {
+                self.history_sel = 0;
+                self.load_history_issues();
+            }
+            KeyCode::Char('G') => {
+                self.history_sel = len - 1;
+                self.load_history_issues();
             }
             KeyCode::Char('e') | KeyCode::Enter => {
                 if let Some(sprint) = self.history_sprints.get(self.history_sel) {
@@ -1662,14 +1732,21 @@ impl App {
                 self.handle_sprint_form_key(key);
             }
 
-            Some(Popup::GanttEpicDetail { search, search_active, scroll, issues, .. }) => {
-                let issue_count = issues.len();
+            Some(Popup::GanttEpicDetail { search, search_active, scroll, sel, issues, .. }) => {
+                // Build filtered count based on current search
+                let q_lower = search.to_lowercase();
+                let filtered_count = issues.iter().filter(|i| {
+                    if q_lower.is_empty() { return true; }
+                    i.title.to_lowercase().contains(&q_lower)
+                        || i.status.label().to_lowercase().contains(&q_lower)
+                }).count();
                 match key.code {
                     KeyCode::Esc => {
                         if *search_active {
                             *search_active = false;
                             search.clear();
                             *scroll = 0;
+                            *sel = 0;
                         } else {
                             self.popup = None;
                         }
@@ -1683,21 +1760,51 @@ impl App {
                     KeyCode::Enter if *search_active => {
                         *search_active = false;
                     }
+                    KeyCode::Enter if !*search_active => {
+                        // Open EditIssue for the selected filtered issue
+                        let q2 = search.to_lowercase();
+                        let selected_issue = issues.iter()
+                            .filter(|i| {
+                                if q2.is_empty() { return true; }
+                                i.title.to_lowercase().contains(&q2)
+                                    || i.status.label().to_lowercase().contains(&q2)
+                            })
+                            .nth(*sel)
+                            .cloned();
+                        if let Some(issue) = selected_issue {
+                            let issue_id = issue.id;
+                            self.popup = None;
+                            // reload subtask drafts from full issues list
+                            let subtasks = self.subtask_drafts_for(issue_id);
+                            let mut form = IssueForm::from_issue(&issue);
+                            form.subtasks = subtasks;
+                            self.popup = Some(Popup::EditIssue(form));
+                        }
+                    }
                     KeyCode::Backspace if *search_active => {
                         search.pop();
                         *scroll = 0;
+                        *sel = 0;
                     }
                     KeyCode::Char(c) if *search_active => {
                         search.push(c);
                         *scroll = 0;
+                        *sel = 0;
                     }
-                    KeyCode::Char('j') => {
-                        if issue_count > 0 && *scroll + 1 < issue_count {
-                            *scroll += 1;
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if filtered_count > 0 && *sel + 1 < filtered_count {
+                            *sel += 1;
                         }
                     }
-                    KeyCode::Char('k') => {
-                        *scroll = scroll.saturating_sub(1);
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if *sel > 0 { *sel -= 1; }
+                    }
+                    KeyCode::Char('g') if !*search_active => {
+                        *sel = 0;
+                        *scroll = 0;
+                    }
+                    KeyCode::Char('G') if !*search_active => {
+                        *sel = filtered_count.saturating_sub(1);
                     }
                     _ => {}
                 }
@@ -1754,36 +1861,10 @@ impl App {
                     popup.due_date_dropdown_open = false;
                     return;
                 }
-                if popup.status_dropdown_open {
-                    popup.status_dropdown_open = false;
-                    return;
-                }
                 self.popup = None;
                 return;
             }
             KeyCode::Tab => {
-                // Close status dropdown on Tab (commits current selection)
-                if popup.focused_field == 3 && popup.status_dropdown_open {
-                    let popup2 = match &mut self.popup {
-                        Some(Popup::NewIssue(f)) | Some(Popup::EditIssue(f)) => f,
-                        _ => return,
-                    };
-                    popup2.status_idx = popup2.status_dropdown_sel;
-                    popup2.status_dropdown_open = false;
-                    let next = popup2.focused_field + 1;
-                    if next >= IssueForm::field_count() {
-                        popup2.in_subtask_list = true;
-                        popup2.subtask_sel = 0;
-                        popup2.subtask_editing = false;
-                    } else {
-                        popup2.focused_field = next;
-                        if popup2.focused_field == 4 {
-                            popup2.due_date_dropdown_open = true;
-                            popup2.due_date_dropdown_sel = 0;
-                        }
-                    }
-                    return;
-                }
                 // If epic dropdown is open, commit selected item then advance
                 if popup.focused_field == 1 && popup.epic_dropdown_open {
                     let q = popup.epic.to_lowercase();
@@ -2036,34 +2117,19 @@ impl App {
         popup.error = None;
 
         if popup.focused_field == 3 {
-            if popup.status_dropdown_open {
-                // Dropdown navigation
-                match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        if popup.status_dropdown_sel < 2 { popup.status_dropdown_sel += 1; }
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        if popup.status_dropdown_sel > 0 { popup.status_dropdown_sel -= 1; }
-                    }
-                    KeyCode::Enter | KeyCode::Char(' ') => {
-                        popup.status_idx = popup.status_dropdown_sel;
-                        popup.status_dropdown_open = false;
-                    }
-                    KeyCode::Esc => {
-                        popup.status_dropdown_open = false;
-                    }
-                    _ => {}
-                }
-                return;
-            }
-            // Status field not open: any printable key or Enter/Space opens the dropdown
+            // Status field: cycle with h/l
             match key.code {
-                KeyCode::Enter | KeyCode::Char(' ') => {
-                    popup.status_dropdown_sel = popup.status_idx;
-                    popup.status_dropdown_open = true;
+                KeyCode::Char('h') => {
+                    if popup.status_idx > 0 { popup.status_idx -= 1; }
+                    return;
+                }
+                KeyCode::Char('l') => {
+                    if popup.status_idx < 2 { popup.status_idx += 1; }
+                    return;
                 }
                 _ => {}
             }
+            // Status cycling handled above (h/l keys)
         } else if popup.focused_field == 1 && popup.epic_dropdown_open {
             // Epic dropdown navigation — commit selection on Enter/Tab
             match key.code {

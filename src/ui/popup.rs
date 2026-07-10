@@ -71,13 +71,11 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
     f.render_widget(Clear, area);
 
     let bottom_hint = if form.in_subtask_list {
-        " [j/k] nav  [e] edit  []/[ status  [x] del  [Ctrl+N] add  [Esc] back  [Enter] save "
-    } else if form.status_dropdown_open {
-        " [j/k] select  [Enter] confirm  [Esc] close "
+        " [j/k] nav  [e] edit  [h/l] status  [x] del  [Ctrl+N] add  [Esc] back  [Enter] save "
     } else if form.focused_field == 5 {
         " [Tab] next field  [Enter] save  [Esc] cancel "
     } else {
-        " [Tab] next field  [Enter] save  [Esc] cancel "
+        " [Tab/Shift+Tab] field  [h/l] status  [Enter] save  [Esc] cancel "
     };
 
     let block = Block::default()
@@ -136,11 +134,7 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
         let is_focused = form.focused_field == i && !form.in_subtask_list;
         let label = FIELD_LABELS[i];
 
-        let value_display = if i == 3 {
-            // Status: show current value with dropdown hint
-            let arrow = if is_focused { "  ▼" } else { "" };
-            format!(" {}{}", values[i], arrow)
-        } else if i == 5 {
+        let value_display = if i == 5 {
             // Description: use real terminal cursor, no block cursor char
             format!(" {}", values[i])
         } else {
@@ -266,11 +260,6 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
     // ── Due-date autocomplete dropdown ─────────────────────────────────────────
     if form.due_date_dropdown_open {
         render_due_date_dropdown(f, form, app, field_areas[4]);
-    }
-
-    // ── Status dropdown ─────────────────────────────────────────────────────────
-    if form.status_dropdown_open {
-        render_status_dropdown(f, form, field_areas[3]);
     }
 }
 
@@ -410,54 +399,6 @@ fn render_trash(f: &mut Frame, items: &[crate::models::Issue], sel: usize) {
     let list = List::new(list_items)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
     f.render_stateful_widget(list, inner, &mut state);
-}
-
-fn render_status_dropdown(f: &mut Frame, form: &IssueForm, field_area: Rect) {
-    const OPTIONS: [(&str, Color); 3] = [
-        ("Todo",        Color::Yellow),
-        ("In Progress", Color::Cyan),
-        ("Done",        Color::Green),
-    ];
-
-    let height = OPTIONS.len() as u16 + 2;
-    let width = 16u16;
-    let drop_area = Rect {
-        x: field_area.x + 2,
-        y: field_area.y + field_area.height,
-        width,
-        height,
-    };
-
-    f.render_widget(Clear, drop_area);
-
-    let sel = form.status_dropdown_sel;
-    let items: Vec<ListItem> = OPTIONS
-        .iter()
-        .enumerate()
-        .map(|(i, (label, color))| {
-            let is_sel = i == sel;
-            ListItem::new(Line::from(Span::styled(
-                format!(" {label}"),
-                if is_sel {
-                    Style::default().fg(*color).add_modifier(Modifier::REVERSED | Modifier::BOLD)
-                } else {
-                    Style::default().fg(*color)
-                },
-            )))
-        })
-        .collect();
-
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Cyan))
-            .title(Span::styled(" status ", Style::default().fg(Color::DarkGray))),
-    );
-
-    let mut state = ratatui::widgets::ListState::default();
-    state.select(Some(sel));
-    f.render_stateful_widget(list, drop_area, &mut state);
 }
 
 fn render_epic_dropdown(f: &mut Frame, form: &IssueForm, app: &App, epic_field_area: Rect) {
@@ -1125,6 +1066,7 @@ fn render_help(f: &mut Frame) {
         key("d  /  T", "Trash issue  /  open trash"),
         key("s  /  S", "Toggle sprint  /  sprint manager"),
         key("c", "Toggle show completed"),
+        key("y", "Yank issue to clipboard"),
         key("/", "Search"),
         sep(),
         hdr("KANBAN"),
@@ -1135,7 +1077,7 @@ fn render_help(f: &mut Frame) {
         sep(),
         hdr("FORMS"),
         key("Tab / Shift-Tab", "Next / previous field"),
-        key("h / l", "Regress / advance subtask status"),
+        key("h / l", "Advance / regress status (or subtask)"),
         key("Del", "Clear due date field"),
         key("Ctrl-N", "Add subtask"),
         key("x", "Remove subtask"),

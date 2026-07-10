@@ -242,9 +242,9 @@ fn build_timeline_header(
 // ── Epic detail popup ──────────────────────────────────────────────────────────
 
 pub fn render_epic_detail_popup(f: &mut Frame, popup: &Popup) {
-    let (epic, issues, search, search_active, scroll) = match popup {
-        Popup::GanttEpicDetail { epic, issues, search, search_active, scroll } => {
-            (epic, issues, search, *search_active, *scroll)
+    let (epic, issues, search, search_active, sel, scroll) = match popup {
+        Popup::GanttEpicDetail { epic, issues, search, search_active, sel, scroll } => {
+            (epic, issues, search, *search_active, *sel, *scroll)
         }
         _ => return,
     };
@@ -276,7 +276,7 @@ pub fn render_epic_detail_popup(f: &mut Frame, popup: &Popup) {
     let ip_sp: f64     = issues.iter().filter(|i| i.status == Status::InProgress).map(|i| i.story_points).sum();
     let todo_sp: f64   = issues.iter().filter(|i| i.status == Status::Todo).map(|i| i.story_points).sum();
 
-    let bottom_hint = " [j/k] scroll  [/] search  [Esc/q] close ";
+    let bottom_hint = " [j/k] navigate  [Enter] edit  [/] search  [Esc/q] close ";
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -361,28 +361,45 @@ pub fn render_epic_detail_popup(f: &mut Frame, popup: &Popup) {
     // ── Issue list ─────────────────────────────────────────────────────────
     let col_w = list_chunk.width as usize;
     let title_max = col_w.saturating_sub(32);
+
+    // Auto-scroll: keep sel visible
+    let visible_rows = list_chunk.height as usize;
+    let scroll = if sel < scroll {
+        sel
+    } else if sel >= scroll + visible_rows {
+        sel + 1 - visible_rows
+    } else {
+        scroll
+    };
+
     let items: Vec<ListItem> = filtered
         .iter()
+        .enumerate()
         .skip(scroll)
-        .map(|issue| {
+        .map(|(idx, issue)| {
+            let is_sel = idx == sel;
             let sc = status_color(&issue.status);
             let sym = match issue.status {
                 Status::Todo => "○",
                 Status::InProgress => "◉",
                 Status::Done => "✓",
             };
+            let pointer = if is_sel { "▶" } else { " " };
             let due = issue.due_date
                 .map(|d| format!("  {}", d.format("%b %d")))
                 .unwrap_or_default();
+            let title_style = if is_sel {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else if issue.status == Status::Done {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
             Line::from(vec![
-                Span::styled(format!("  {sym} "), Style::default().fg(sc)),
+                Span::styled(format!("{pointer} {sym} "), Style::default().fg(sc)),
                 Span::styled(
                     format!("{:<width$}", trunc(&issue.title, title_max), width = title_max),
-                    if issue.status == Status::Done {
-                        Style::default().fg(Color::DarkGray)
-                    } else {
-                        Style::default()
-                    },
+                    title_style,
                 ),
                 Span::styled(
                     format!("  {:>4}sp", format_sp(issue.story_points)),

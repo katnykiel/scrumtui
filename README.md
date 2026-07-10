@@ -2,7 +2,7 @@
 
 A minimal, local, terminal-based scrum system driven by keyboard shortcuts. I use scrum every day to manage my research, and got sick of the existing scrum systems, so I vibe-coded this TUI to fit my needs. Maybe you'll find it useful too!
 
-**Version 1.4.0**
+**Version 1.5.0**
 
 ---
 
@@ -16,7 +16,7 @@ A minimal, local, terminal-based scrum system driven by keyboard shortcuts. I us
 
 ## What it is
 
-`scrumtui` is a lightweight personal scrum system that lives entirely on your machine — no server, no account, no browser. Everything is stored in a single SQLite file. Four views: **Backlog** (`1`), **Kanban** (`2`), **Gantt** (`3`), **Sprint History** (`4`). The sprint manager (`S`) includes a live burnup chart.
+`scrumtui` is a lightweight personal scrum system that lives entirely on your machine — no server, no account, no browser. Everything is stored in a single SQLite file. Four views: **Backlog** (`1`), **Kanban** (`2`), **Gantt** (`3`), **Sprint History** (`4`). The sprint manager (`S`) includes a live burnup chart; history view (`4`) includes per-sprint velocity analysis and safe-start recommendations.
 
 ---
 
@@ -35,13 +35,17 @@ cargo build --release
 
 ## Keys
 
-`j`/`k` navigate, `h`/`l` advance/regress status (backlog) or navigate columns (kanban), `Tab` next field or panel, `e`/`Enter` edit, `Esc` cancel. `?` opens the full help overlay.
+`j`/`k` navigate, `Tab` next field or panel, `e`/`Enter` edit, `Esc` cancel. `g`/`G` jump top/bottom; `Ctrl-D`/`Ctrl-U` page down/up. `?` opens the full help overlay.
 
-**Backlog:** `n` new · `e` edit · `d`/`T` trash · `s`/`S` sprint toggle/manager · `c` toggle done · `/` search · `Ctrl-j`/`Ctrl-k` reorder
+**Backlog:** `n` new · `d`/`T` trash · `s`/`S` sprint toggle/manager · `c` toggle done · `y` yank to clipboard · `/` search · `h`/`l` status (or `Ctrl-j`/`Ctrl-k` reorder)
 
-**Kanban:** `h`/`l` navigate column · `Ctrl-H`/`Ctrl-L` move issue to prev/next column · `Tab` parent↔subtask panel · `<`/`>` cycle parent
+**Kanban:** `h`/`l` navigate column · `Ctrl-H`/`Ctrl-L` move to prev/next column · `Tab` parent↔subtask panel · `<`/`>` cycle parent
 
-**Forms:** `Tab`/`Shift-Tab` next/prev field · `h`/`l` regress/advance subtask status · `Del` clear due date · `Ctrl-N` add subtask · `x` remove subtask · `Ctrl-S` save
+**Gantt:** `e`/`Enter` epic detail · issue list: `j`/`k` navigate · `Enter` edit
+
+**History:** `j`/`k` select sprint · `e`/`Enter` rename sprint · `d` delete sprint
+
+**Forms:** `Tab`/`Shift-Tab` next/prev field · `h`/`l` status (or subtask status) · `Del` clear due date · `Ctrl-N` add subtask · `x` remove subtask · `Ctrl-S` save
 
 ---
 
