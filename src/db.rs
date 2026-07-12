@@ -75,6 +75,24 @@ impl Db {
         let _ = self.conn.execute_batch(
             "ALTER TABLE issues ADD COLUMN started_at TEXT;",
         );
+        // primary_sprint_id kept for backwards compat with existing databases (ignored)
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE issues ADD COLUMN primary_sprint_id INTEGER;",
+        );
+        // Sprint membership log: every (issue, sprint) pairing that has ever existed.
+        // Used by the history view so carried issues appear in every sprint they touched.
+        let _ = self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS issue_sprint_log (
+                issue_id  INTEGER NOT NULL,
+                sprint_id INTEGER NOT NULL,
+                PRIMARY KEY (issue_id, sprint_id)
+            );",
+        );
+        // Backfill log from issues.sprint_id for databases that predate this table.
+        let _ = self.conn.execute_batch(
+            "INSERT OR IGNORE INTO issue_sprint_log (issue_id, sprint_id)
+             SELECT id, sprint_id FROM issues WHERE sprint_id IS NOT NULL;",
+        );
         // Settings table for persisting UI preferences
         let _ = self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS settings (
@@ -459,15 +477,6 @@ impl Db {
         Ok(())
     }
 
-    /// Override completed_at directly – used by seed data to backdate completions.
-    pub fn set_completed_at(&self, id: i64, ts: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE issues SET completed_at=?1, updated_at=?1 WHERE id=?2",
-            params![ts, id],
-        )?;
-        Ok(())
-    }
-
     /// Swap the rank values of two issues (used for reordering in the backlog).
     pub fn swap_rank(&self, id_a: i64, id_b: i64) -> Result<()> {
         let rank_a: i64 = self.conn.query_row(
@@ -502,13 +511,21 @@ impl Db {
         Ok(())
     }
 
-    pub fn set_issue_sprint(&self, issue_id: i64, sprint_id: Option<i64>) -> Result<()> {
-        self.conn.execute(
-            "UPDATE issues SET sprint_id=?1, updated_at=?2 WHERE id=?3",
-            params![sprint_id, now_str(), issue_id],
-        )?;
-        Ok(())
-    }
+     pub fn set_issue_sprint(&self, issue_id: i64, sprint_id: Option<i64>) -> Result<()> {
+         self.conn.execute(
+             "UPDATE issues SET sprint_id=?1, updated_at=?2 WHERE id=?3",
+             params![sprint_id, now_str(), issue_id],
+         )?;
+         // Log this sprint membership so the history view can find the issue even after
+         // it has been carried forward to a later sprint.
+         if let Some(sid) = sprint_id {
+             self.conn.execute(
+                 "INSERT OR IGNORE INTO issue_sprint_log (issue_id, sprint_id) VALUES (?1, ?2)",
+                 params![issue_id, sid],
+             )?;
+         }
+         Ok(())
+     }
 
     pub fn update_issue_status(&self, issue_id: i64, status: &Status) -> Result<()> {
         let now = now_str();
@@ -577,16 +594,17 @@ impl Db {
         Ok(sprints)
     }
 
-    /// Return all issues that were ever in a given sprint (including deleted), ordered by rank.
-    pub fn get_sprint_issues(&self, sprint_id: i64) -> Result<Vec<Issue>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, title, story_points, epic, status, due_date, description,
-                    sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count,
-                    started_at
-             FROM issues
-             WHERE sprint_id = ?1 AND parent_id IS NULL
-             ORDER BY created_at DESC, id DESC",
-        )?;
+    /// Return all issues that were ever in a given sprint, ordered by rank.
+     pub fn get_sprint_issues(&self, sprint_id: i64) -> Result<Vec<Issue>> {
+         let mut stmt = self.conn.prepare(
+             "SELECT id, title, story_points, epic, status, due_date, description,
+                     sprint_id, created_at, updated_at, completed_at, parent_id, rank, carry_count,
+                     started_at
+              FROM issues
+              WHERE parent_id IS NULL
+                AND id IN (SELECT issue_id FROM issue_sprint_log WHERE sprint_id = ?1)
+              ORDER BY rank ASC, id ASC",
+         )?;
         let issues = stmt.query_map(params![sprint_id], |row| {
             let status_str: String = row.get(4)?;
             let due_str: Option<String> = row.get(5)?;
@@ -627,25 +645,34 @@ impl Db {
     /// Move all TODO/IN_PROGRESS issues from one sprint to another.
     /// Returns the number of issues moved.
     pub fn move_incomplete_issues_to_sprint(&self, from_sprint_id: i64, to_sprint_id: i64) -> Result<usize> {
+        let now = now_str();
         let n = self.conn.execute(
             "UPDATE issues SET sprint_id = ?1, updated_at = ?2
              WHERE sprint_id = ?3 AND status IN ('TODO', 'IN_PROGRESS') AND deleted_at IS NULL",
-            params![to_sprint_id, now_str(), from_sprint_id],
+            params![to_sprint_id, now, from_sprint_id],
+        )?;
+        // Log the new sprint membership for all moved issues
+        self.conn.execute(
+            "INSERT OR IGNORE INTO issue_sprint_log (issue_id, sprint_id)
+             SELECT id, ?1 FROM issues
+             WHERE sprint_id = ?1 AND status IN ('TODO', 'IN_PROGRESS') AND deleted_at IS NULL",
+            params![to_sprint_id],
         )?;
         Ok(n)
     }
 
-    /// Return aggregate (sprint_id, total_sp, done_sp) for all sprints — lightweight summary
-    /// used for velocity and trend analysis in the history view.
-    pub fn get_all_sprint_summary(&self) -> Result<Vec<(i64, f64, f64)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT sprint_id,
-                    SUM(story_points),
-                    SUM(CASE WHEN status = 'DONE' THEN story_points ELSE 0.0 END)
-             FROM issues
-             WHERE sprint_id IS NOT NULL AND parent_id IS NULL AND deleted_at IS NULL
-             GROUP BY sprint_id",
-        )?;
+     /// Return aggregate (sprint_id, total_sp, done_sp) for all sprints — lightweight summary
+     /// used for velocity and trend analysis in the history view.
+     pub fn get_all_sprint_summary(&self) -> Result<Vec<(i64, f64, f64)>> {
+         let mut stmt = self.conn.prepare(
+             "SELECT l.sprint_id,
+                     SUM(i.story_points),
+                     SUM(CASE WHEN i.status = 'DONE' THEN i.story_points ELSE 0.0 END)
+              FROM issue_sprint_log l
+              JOIN issues i ON i.id = l.issue_id
+              WHERE i.parent_id IS NULL AND i.deleted_at IS NULL
+              GROUP BY l.sprint_id",
+         )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?))
         })?.collect::<rusqlite::Result<Vec<_>>>()?;

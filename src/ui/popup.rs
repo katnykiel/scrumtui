@@ -1055,6 +1055,8 @@ fn render_help(f: &mut Frame) {
         sep(),
         hdr("GLOBAL"),
         key("j / k", "Navigate up / down"),
+        key("g / G", "Jump to top / bottom"),
+        key("PgDn / PgUp", "Page down / up (10 items)"),
         key("h / l", "Advance / regress status  (backlog)"),
         key("e", "Edit selected issue"),
         key("n", "New issue"),

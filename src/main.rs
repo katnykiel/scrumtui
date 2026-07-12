@@ -268,6 +268,63 @@ fn main() -> Result<()> {
             return Ok(());
         }
 
+        // ── scrumtui demo (load temporary demo database)
+        Some("demo") => {
+            use std::env;
+            // Create a temporary database in /tmp for the demo session
+            let temp_dir = env::temp_dir();
+            let demo_db_path = temp_dir.join("scrumtui_demo.db");
+            
+            // Remove old demo database if it exists
+            let _ = std::fs::remove_file(&demo_db_path);
+            
+            let db = Db::open(demo_db_path.to_str().unwrap_or("scrumtui_demo.db"))?;
+            seed::seed(&db)?;
+            println!("Loading postdoc computational materials science demo...");
+            
+            let mut app = App::new(db)?;
+            app.backlog_sel_to_first_issue();
+            
+            // Setup terminal
+            enable_raw_mode()?;
+            let mut stdout = io::stdout();
+            execute!(stdout, EnterAlternateScreen)?;
+            let backend = CrosstermBackend::new(stdout);
+            let mut terminal = Terminal::new(backend)?;
+            
+            let default_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                let _ = disable_raw_mode();
+                let _ = execute!(io::stdout(), LeaveAlternateScreen);
+                default_hook(info);
+            }));
+            
+            let quit_flag = Arc::new(AtomicBool::new(false));
+            for sig in [
+                signal_hook::consts::SIGTERM,
+                signal_hook::consts::SIGHUP,
+                signal_hook::consts::SIGINT,
+            ] {
+                signal_hook::flag::register(sig, Arc::clone(&quit_flag))
+                    .expect("failed to register signal handler");
+            }
+            
+            let res = run_app(&mut terminal, &mut app, quit_flag);
+            
+            disable_raw_mode()?;
+            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+            terminal.show_cursor()?;
+            
+            if let Err(err) = res {
+                eprintln!("Error: {err:?}");
+            }
+            
+            // Clean up demo database
+            let _ = std::fs::remove_file(&demo_db_path);
+            
+            return Ok(());
+        }
+
         Some("--version") | Some("-V") | Some("-v") => {
             println!("scrumtui {}", env!("CARGO_PKG_VERSION"));
             return Ok(());

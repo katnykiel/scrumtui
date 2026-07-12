@@ -1043,7 +1043,7 @@ impl App {
                 self.undo();
                 return false;
             }
-            KeyCode::Char('u') => {
+            KeyCode::Char('u') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.undo();
                 return false;
             }
@@ -1104,6 +1104,8 @@ impl App {
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 for _ in 0..10 { self.backlog_up(); }
             }
+            KeyCode::PageDown => { for _ in 0..10 { self.backlog_down(); } }
+            KeyCode::PageUp   => { for _ in 0..10 { self.backlog_up(); } }
             KeyCode::Char('g') => self.backlog_sel_to_first_issue(),
             KeyCode::Char('/') => {
                 self.search_active = true;
@@ -1522,6 +1524,14 @@ impl App {
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.gantt_sel = self.gantt_sel.saturating_sub(10);
             }
+            KeyCode::PageDown => {
+                if epic_count > 0 {
+                    self.gantt_sel = (self.gantt_sel + 10).min(epic_count - 1);
+                }
+            }
+            KeyCode::PageUp => {
+                self.gantt_sel = self.gantt_sel.saturating_sub(10);
+            }
             KeyCode::Char('g') => {
                 self.gantt_sel = 0;
                 self.gantt_scroll = 0;
@@ -1589,11 +1599,19 @@ impl App {
                 self.history_sel = move_by(self.history_sel, -1, len);
                 self.load_history_issues();
             }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.history_sel = move_by(self.history_sel, 10, len);
                 self.load_history_issues();
             }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.history_sel = move_by(self.history_sel, -10, len);
+                self.load_history_issues();
+            }
+            KeyCode::PageDown => {
+                self.history_sel = move_by(self.history_sel, 10, len);
+                self.load_history_issues();
+            }
+            KeyCode::PageUp => {
                 self.history_sel = move_by(self.history_sel, -10, len);
                 self.load_history_issues();
             }

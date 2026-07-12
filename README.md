@@ -1,14 +1,12 @@
 # scrumtui
 
-A minimal, local, terminal-based scrum system driven by keyboard shortcuts. I use scrum every day to manage my research, and got sick of the existing scrum systems, so I vibe-coded this TUI to fit my needs. Maybe you'll find it useful too!
-
-**Version 1.5.0**
+A minimal, local, terminal-based scrum system driven by keyboard shortcuts. I use scrum every day to manage my research, and after years of imperfect solutions I vibe-coded this TUI to fit my needs. Maybe you'll find it useful too!
 
 ---
 
 > **⚠ AI-GENERATED CODE DISCLAIMER**
 >
-> The majority of this codebase was generated with the assistance of OpenCode and Claude Sonnet 4.6. It has been reviewed and lightly edited by a human, but has not been rigorously audited. Use at your own risk, and inspect any code before relying on it in a critical context.
+> The majority of this codebase was generated with the assistance of OpenCode and Claude. It has been reviewed and lightly edited by a human, but has not been rigorously audited. Use at your own risk, and inspect any code before relying on it in a critical context.
 
 ---
 
@@ -16,7 +14,7 @@ A minimal, local, terminal-based scrum system driven by keyboard shortcuts. I us
 
 ## What it is
 
-`scrumtui` is a lightweight personal scrum system that lives entirely on your machine — no server, no account, no browser. Everything is stored in a single SQLite file. Four views: **Backlog** (`1`), **Kanban** (`2`), **Gantt** (`3`), **Sprint History** (`4`). The sprint manager (`S`) includes a live burnup chart; history view (`4`) includes per-sprint velocity analysis and safe-start recommendations.
+`scrumtui` is a lightweight personal scrum system that lives entirely on your machine. Everything is stored in a single SQLite file. Four views: **Backlog** (`1`), **Kanban** (`2`), **Gantt** (`3`), **Sprint History** (`4`).
 
 ---
 
@@ -28,14 +26,17 @@ Requires [Rust](https://rustup.rs/) (stable, 1.75+). SQLite is bundled at compil
 git clone https://github.com/katnykiel/scrumtui
 cd scrumtui
 cargo build --release
-./target/release/scrumtui
+./target/release/scrumtui demo    # Load temporary demo with sample postdoc research data
+# or: ./target/release/scrumtui    # Start with your database (creates one if needed)
 ```
 
 ---
 
 ## Keys
 
-`j`/`k` navigate, `Tab` next field or panel, `e`/`Enter` edit, `Esc` cancel. `g`/`G` jump top/bottom; `Ctrl-D`/`Ctrl-U` page down/up. `?` opens the full help overlay.
+Generally, I tried to use vim keybinds. If you've used vim before, this should feel comfortable.
+
+`j`/`k` navigate, `Tab` next field or panel, `e`/`Enter` edit, `Esc` cancel. `g`/`G` jump top/bottom; `PgDn`/`PgUp` page down/up. `?` opens the full help overlay.
 
 **Backlog:** `n` new · `d`/`T` trash · `s`/`S` sprint toggle/manager · `c` toggle done · `y` yank to clipboard · `/` search · `h`/`l` status (or `Ctrl-j`/`Ctrl-k` reorder)
 
@@ -43,7 +44,7 @@ cargo build --release
 
 **Gantt:** `e`/`Enter` epic detail · issue list: `j`/`k` navigate · `Enter` edit
 
-**History:** `j`/`k` select sprint · `e`/`Enter` rename sprint · `d` delete sprint
+**History:** `j`/`k` select sprint · `PgDn`/`PgUp` page · `e`/`Enter` rename sprint · `d` delete sprint
 
 **Forms:** `Tab`/`Shift-Tab` next/prev field · `h`/`l` status (or subtask status) · `Del` clear due date · `Ctrl-N` add subtask · `x` remove subtask · `Ctrl-S` save
 
@@ -58,6 +59,8 @@ Resolved in order: `--db <path>` flag → `SCRUMTUI_DB` env var → `~/.config/s
 ## CLI
 
 ```bash
+scrumtui demo                          # Launch temporary demo with sample postdoc data
+scrumtui init                          # Initialize blank database
 scrumtui add "Title" -e epic -p 2 -d 2026-06-20 --sprint
 scrumtui status 42 done
 scrumtui list [--all] [--sprint] [-s todo|ip|done]

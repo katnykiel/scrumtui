@@ -6,6 +6,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.0] — 2026-07-12
+
+Major release with bug fixes, improved UI responsiveness, and enhanced demo data.
+
+### Added
+- **`scrumtui demo` command**: Quick-start with postdoc computational materials science sample data in a temporary database. Includes realistic research tasks, paper submissions, and collaboration workflows. Demo data is automatically cleaned up on exit, leaving your actual database untouched.
+- **Responsive history view columns**: Issue list in sprint history now adapts column widths to terminal width, ensuring epic names and other metadata remain visible on resize.
+- **Sprint membership log**: New `issue_sprint_log` table records every (issue, sprint) pairing that has ever existed. Replaces the broken `primary_sprint_id` approach — issues that carry across A→B→C now appear correctly in all three sprints' history views.
+
+### Fixed
+- **Sprint history view epic display**: Fixed hard-coded column widths that prevented epic names from displaying on narrow terminals. Columns now dynamically allocate space: ~40% title, ~25% epic, rest for other fields.
+- **Sprint history missing issues**: Fixed bug where issues moved from sprint A→B→C would disappear from A and B's history views. The old `primary_sprint_id` column only tracked one hop. The new `issue_sprint_log` table is append-only: every time `set_issue_sprint` or `move_incomplete_issues_to_sprint` runs, a row is inserted, so all affected sprints show the issue. The `sprint_id` column still tracks current assignment for the backlog/kanban.
+- **Page navigation keybinds**: `Ctrl-F`/`Ctrl-B` and `Ctrl-D`/`Ctrl-U` are unreliable — terminals, tmux, and readline all intercept them before the app sees them. Replaced with `PgDn`/`PgUp` (physical keys that always reach the app in raw mode) across all four views. Also fixed a root cause bug: the global `u` handler (undo) was matching before modifier checks, eating `Ctrl-U` in every view.
+
+### Changed
+- README updated with 2.0.0 release notes and demo command documentation.
+- Demo seed data changed from generic DFT/MXene workflow to postdoc-focused defect analysis research pipeline (computational materials science use case).
+
+---
+
 ## [1.5.0] — 2026-07-10
 
 ### Added

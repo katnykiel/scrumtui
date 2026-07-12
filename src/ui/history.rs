@@ -66,7 +66,7 @@ fn render_sprint_list(f: &mut Frame, app: &App, area: Rect) {
                     Span::raw(" "),
                 ]))
                 .title_bottom(Line::from(Span::styled(
-                    " [j/k/g/G] navigate  [^d/^u] page  [e] rename  [d] delete ",
+                    " [j/k/g/G] navigate  [PgDn/PgUp] page  [e] rename  [d] delete ",
                     Style::default().fg(Color::DarkGray),
                 )))
                 .border_style(Style::default().fg(Color::Rgb(80, 80, 120))),
@@ -226,7 +226,13 @@ fn render_stats_header(
 
 fn render_issue_list(f: &mut Frame, issues: &[crate::models::Issue], area: Rect) {
     let col_w = area.width as usize;
-    let title_max = col_w.saturating_sub(30);
+    // Calculate column widths dynamically
+    // sym(3) + title(flexible) + id(8) + sp(7) + status(6) + epic(12) + due(10)
+    // Allocate roughly: title takes 40%, epic takes 25%, rest fixed
+    let fixed_width = 3 + 8 + 7 + 6 + 10 + 4; // sym, id, sp, status, due, spacing
+    let flexible = col_w.saturating_sub(fixed_width);
+    let title_max = (flexible * 40 / 100).max(20);
+    let epic_max = (flexible * 25 / 100).max(10);
 
     let list_items: Vec<ListItem> = issues
         .iter()
@@ -243,7 +249,7 @@ fn render_issue_list(f: &mut Frame, issues: &[crate::models::Issue], area: Rect)
                 Span::styled(format!("  #{}", issue.id), Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("  {:>4}sp", format_sp(issue.story_points)), Style::default().fg(Color::Magenta)),
                 Span::styled(format!("  {:<4}", issue.status.short()), Style::default().fg(sc)),
-                Span::styled(format!("  {:<12}", trunc(&issue.epic, 12)), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("  {:<width$}", trunc(&issue.epic, epic_max), width = epic_max), Style::default().fg(Color::Cyan)),
                 Span::styled(due, Style::default().fg(Color::DarkGray)),
             ]).into()
         })
