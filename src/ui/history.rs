@@ -226,13 +226,15 @@ fn render_stats_header(
 
 fn render_issue_list(f: &mut Frame, issues: &[crate::models::Issue], area: Rect) {
     let col_w = area.width as usize;
-    // Calculate column widths dynamically
-    // sym(3) + title(flexible) + id(8) + sp(7) + status(6) + epic(12) + due(10)
-    // Allocate roughly: title takes 40%, epic takes 25%, rest fixed
-    let fixed_width = 3 + 8 + 7 + 6 + 10 + 4; // sym, id, sp, status, due, spacing
+    // Calculate column widths dynamically.
+    // Fixed columns: sym(3) + id(8) + sp(7) + status(6) + due(10) + spacing(4) = 38
+    // Remaining space is split ~62% title, ~38% epic (epic hidden if no room).
+    let fixed_width = 3 + 8 + 7 + 6 + 10 + 4;
     let flexible = col_w.saturating_sub(fixed_width);
-    let title_max = (flexible * 40 / 100).max(20);
-    let epic_max = (flexible * 25 / 100).max(10);
+    // Give title the lion's share; epic gets whatever is left after title.
+    // If flexible is very small, epic may end up as 0 (hidden) — that's intentional.
+    let title_max = flexible * 62 / 100;
+    let epic_max = flexible.saturating_sub(title_max);
 
     let list_items: Vec<ListItem> = issues
         .iter()
@@ -382,12 +384,13 @@ fn render_analysis_panel(
         Span::styled(format!("  ({}/{}sp)", format_sp(done_sp), format_sp(total_sp)), Style::default().fg(Color::DarkGray)),
     ]));
 
-    // Safe start — just the number, color-coded green/yellow
+    // Safe start — round to 1 decimal place, color-coded green/yellow
     if let Some(target) = safe_target {
+        let rounded = (target * 10.0).round() / 10.0;
         let col = if total_sp <= target * 1.1 { Color::Green } else { Color::Yellow };
         lines.push(Line::from(vec![
             Span::styled("  safe start  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("≤{}sp", format_sp(target)), Style::default().fg(col).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("≤{}sp", format_sp(rounded)), Style::default().fg(col).add_modifier(Modifier::BOLD)),
         ]));
     }
 

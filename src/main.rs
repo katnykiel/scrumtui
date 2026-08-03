@@ -444,13 +444,14 @@ fn run_app<B: ratatui::backend::Backend>(
             break;
         }
 
-        // Block indefinitely when idle so we use zero CPU.
-        // Use a short timeout only while a status message is on screen
-        // (so it can expire and be erased).
+        // Use a short timeout while a status message is on screen so it can
+        // expire and be erased.  Otherwise use a 1-second idle timeout:
+        // near-zero CPU cost, but ensures we check quit_flag (set by
+        // SIGTERM/SIGHUP) within 1 s even if the OS doesn't interrupt poll().
         let timeout = if app.current_status().is_some() {
             Duration::from_millis(250)
         } else {
-            Duration::from_secs(3600)
+            Duration::from_secs(1)
         };
 
         let had_event = match event::poll(timeout) {
@@ -477,7 +478,7 @@ fn run_app<B: ratatui::backend::Backend>(
                     }
                 }
                 Event::Resize(_, _) => {} // fall through to redraw
-                _ => continue,            // focus / mouse: skip redraw
+                _ => continue,            // focus/mouse/paste: no state change, skip redraw
             }
         }
 

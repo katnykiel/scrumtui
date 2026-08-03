@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.1] — 2026-08-03
+
+### Fixed
+- **Safe start rounding**: safe-start value in the history analysis panel was displaying raw floating-point output (e.g. `≤12.666666666666666sp`). Now rounded to one decimal place.
+- **Sprint history epic column invisible after resize**: hard minimum column widths (`max(20)` for title, `max(10)` for epic) could exceed the available panel width, pushing the epic column off-screen with no recovery on resize. Column widths are now purely proportional to the actual available space (62% title, 38% epic of flexible room), so the epic column always appears when there is any space to spare.
+- **Orphan process on terminal close**: when the terminal was closed without quitting scrumtui first, the process would block in `event::poll()` for up to one hour before noticing the SIGHUP signal. The idle poll timeout has been reduced from 3600 s to 1 s, so the process exits within one second of receiving any termination signal.
+- **Reduced CPU usage**: the 1 s idle poll cap also bounds any spurious wakeup cost, and non-actionable terminal events (focus, mouse, paste) no longer trigger unnecessary full redraws.
+
+---
+
 ## [2.0.0] — 2026-07-12
 
 Major release with bug fixes, improved UI responsiveness, and enhanced demo data.
