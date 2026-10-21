@@ -2,6 +2,7 @@ mod app;
 mod db;
 mod export;
 mod import;
+mod layout;
 mod models;
 mod seed;
 mod ui;
@@ -435,6 +436,8 @@ fn run_app<B: ratatui::backend::Backend>(
     app: &mut App,
     quit_flag: Arc<AtomicBool>,
 ) -> Result<()> {
+    layout::start_detection();
+
     // Draw once on startup
     terminal.draw(|f| ui::render(f, app))?;
 

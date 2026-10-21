@@ -1037,6 +1037,8 @@ impl App {
             return false;
         }
 
+        let key = crate::layout::remap(key);
+
         // Global keys
         match key.code {
             KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1696,6 +1698,7 @@ impl App {
             }
 
             Some(Popup::Trash { items, sel }) => {
+                let key = crate::layout::remap(key);
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
                         self.popup = None;
@@ -1758,6 +1761,7 @@ impl App {
                     i.title.to_lowercase().contains(&q_lower)
                         || i.status.label().to_lowercase().contains(&q_lower)
                 }).count();
+                let key = if *search_active { key } else { crate::layout::remap(key) };
                 match key.code {
                     KeyCode::Esc => {
                         if *search_active {
@@ -2136,6 +2140,7 @@ impl App {
 
         if popup.focused_field == 3 {
             // Status field: cycle with h/l
+            let key = crate::layout::remap(key);
             match key.code {
                 KeyCode::Char('h') => {
                     if popup.status_idx > 0 { popup.status_idx -= 1; }
@@ -2362,6 +2367,7 @@ impl App {
         }
 
         // Browse mode
+        let key = crate::layout::remap_plain(key);
         match key.code {
             KeyCode::Esc => {
                 popup.in_subtask_list = false;
@@ -2555,6 +2561,7 @@ impl App {
 
         if popup.focused_field == 3 {
             // Boolean toggle
+            let key = crate::layout::remap(key);
             match key.code {
                 KeyCode::Char(' ') | KeyCode::Char('h') | KeyCode::Char('l') => {
                     popup.is_active = !popup.is_active;

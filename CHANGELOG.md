@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.1.0] — 2026-10-21
+
+### Added
+- **Colemak layout support**: scrumtui detects the active keyboard layout (macOS input source, or `setxkbmap` on Linux) and, when it's Colemak, remaps navigation so the physical h/j/k/l positions keep working — `n`↔`j`, `e`↔`k`, `i`↔`l` are swapped in navigation contexts (views, lists, status/toggle fields), never in text fields. The layout is re-checked every 2 s, so switching layouts mid-session just works. Override with `SCRUMTUI_LAYOUT=colemak|qwerty`.
+
+---
+
 ## [2.0.1] — 2026-08-03
 
 ### Fixed
