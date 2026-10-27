@@ -1,298 +1,369 @@
 use anyhow::Result;
-use chrono::{Duration, Local};
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime};
+use rusqlite::params;
 
 use crate::db::Db;
 use crate::models::Status;
 
-/// Populate a temporary database with sample postdoc research data.
+/// Fills a database with six weeks of a computational materials postdoc's work
+/// (DFT data, machine-learned interatomic potentials, writing, mentoring), relative
+/// to today: five finished weekly sprints and the current one.
 ///
-/// Timeline (all dates relative to today):
-///   Sprint 1  — 5 weeks ago (completed)
-///   Sprint 2  — 4 weeks ago (completed, 2 issues carried to sprint 3)
-///   Sprint 3  — 3 weeks ago (completed, 1 issue carried to sprint 4)
-///   Sprint 4  — 2 weeks ago (completed, 1 issue carried to sprint 5)
-///   Sprint 5  — current, started 3 days ago
-///
-/// Epics are staggered so the Gantt view shows distinct lanes:
-///   mxene-ox   started ~5 weeks ago
-///   he-carb    started ~4 weeks ago
-///   nequip     started ~3 weeks ago
-///   writing    started ~2 weeks ago
+/// The history is realistic on purpose: scope added mid-sprint, an issue taken back
+/// out, work carried from week to week, and one fellowship statement that has been
+/// put off every single week (the frog).
 pub fn seed(db: &Db) -> Result<()> {
-    let today = Local::now().date_naive();
+    let s = Seeder::new(db);
 
-    // ── helpers ───────────────────────────────────────────────────────────────
-    let dt = |days_ago: i64| -> String {
-        (today - Duration::days(days_ago))
-            .format("%Y-%m-%d 09:00:00")
-            .to_string()
-    };
-    let dt_done = |days_ago: i64| -> String {
-        (today - Duration::days(days_ago))
-            .format("%Y-%m-%d 17:00:00")
-            .to_string()
-    };
-    let date = |days: i64| today + Duration::days(days);
+    // ── Sprints: Monday–Friday, five past weeks and this one ──────────────────
+    let w5 = s.sprint(-5)?;
+    let w4 = s.sprint(-4)?;
+    let w3 = s.sprint(-3)?;
+    let w2 = s.sprint(-2)?;
+    let w1 = s.sprint(-1)?;
+    let w0 = s.sprint(0)?;
 
-    // ── sprints ───────────────────────────────────────────────────────────────
-    let s1 = db.create_sprint(
-        "Sprint 1 — MXene setup",
-        today - Duration::days(35),
-        today - Duration::days(29),
-        false,
+    // The one that keeps slipping.
+    let fellowship = s.issue(
+        "Fellowship proposal: research statement", 5.0, "proposal", s.t(-5, 0, 9),
+        "Two pages: vision, three aims, why this host group. Reuse the MLIP + active-learning story, but lead with a hypothesis, not a list of methods.",
     )?;
-    let s2 = db.create_sprint(
-        "Sprint 2 — Oxidation calcs",
-        today - Duration::days(28),
-        today - Duration::days(22),
-        false,
-    )?;
-    let s3 = db.create_sprint(
-        "Sprint 3 — HE-carbide + AIMD",
-        today - Duration::days(21),
-        today - Duration::days(15),
-        false,
-    )?;
-    let s4 = db.create_sprint(
-        "Sprint 4 — NequIP + writing",
-        today - Duration::days(14),
-        today - Duration::days(8),
-        false,
-    )?;
-    let s5 = db.create_sprint(
-        "Sprint 5 — Revisions",
-        today - Duration::days(3),
-        today + Duration::days(3),
-        true,
-    )?;
+    s.join(fellowship, w5, s.t(-5, 0, 10))?;
+    for (week, sprint) in [(-4, w4), (-3, w3), (-2, w2), (-1, w1), (0, w0)] {
+        s.carry(fellowship, sprint, week)?;
+    }
+    s.due(fellowship, 9)?;
 
-    // ── macro for issue creation ───────────────────────────────────────────────
-    // Issues in sprint 1 (mxene-ox epic, all done)
-    let i1 = db.create_issue_full(
-        "Ti3C2 slab supercell setup",
-        2.0, "mxene-ox", &Status::Done, None,
-        Some("3-layer Ti3C2 slab, 4×4×1 supercell, 15 Å vacuum. Compare PBE-D3 vs vdW-DF2 interlayer spacing against XRD."),
-        None, &dt(34), &dt_done(32), Some(&dt_done(32)),
+    // ── Week -5: set-up ───────────────────────────────────────────────────────
+    let conv = s.issue(
+        "ENCUT and k-point convergence (Li3PS4)", 2.0, "dft-dataset", s.t(-6, 3, 10),
+        "PBEsol, PAW. Converge total energies to 1 meV/atom and forces to 5 meV/Å before generating any training data.",
     )?;
-    db.set_issue_sprint(i1, Some(s1))?;
+    s.join(conv, w5, s.t(-5, 0, 10))?;
+    s.done(conv, s.t(-5, 0, 11), s.t(-5, 1, 16))?;
 
-    let i2 = db.create_issue_full(
-        "ENCUT/k-mesh convergence",
-        2.0, "mxene-ox", &Status::Done, None,
-        Some("Sweep ENCUT 400–700 eV and k-mesh 6×6×1 to 12×12×1. Target <1 meV/atom total energy convergence."),
-        None, &dt(33), &dt_done(31), Some(&dt_done(31)),
+    let atomate = s.issue(
+        "atomate2 workflows on the cluster", 3.0, "hpc", s.t(-5, 0, 9),
+        "Relax + static with a custom INCAR, results to the database. One job array per batch.",
     )?;
-    db.set_issue_sprint(i2, Some(s1))?;
+    s.join(atomate, w5, s.t(-5, 0, 10))?;
+    s.done(atomate, s.t(-5, 1, 9), s.t(-5, 3, 17))?;
+    s.subtask(atomate, "Configure jobflow-remote", s.t(-5, 1, 9), Some((s.t(-5, 1, 9), Some(s.t(-5, 2, 12)))))?;
+    s.subtask(atomate, "Test one relaxation end to end", s.t(-5, 1, 9), Some((s.t(-5, 2, 13), Some(s.t(-5, 3, 17)))))?;
 
-    let i3 = db.create_issue_full(
-        "MXene oxidation lit review",
-        2.0, "mxene-ox", &Status::Done, None,
-        Some("Survey Ti3C2 and V2C oxidation papers 2018–2025. Extract activation barriers, temperature windows, termination effects. Build annotated Zotero collection."),
-        None, &dt(35), &dt_done(30), Some(&dt_done(30)),
+    let reading = s.issue(
+        "Read up on fine-tuning foundation MLIPs", 1.0, "reading", s.t(-5, 0, 9),
+        "What to freeze, how much data is enough, and how others report errors.",
     )?;
-    db.set_issue_sprint(i3, Some(s1))?;
+    s.join(reading, w5, s.t(-5, 0, 10))?;
+    s.done(reading, s.t(-5, 3, 9), s.t(-5, 4, 15))?;
 
-    // Sprint 2: MXene oxidation calculations; HE-carbide started; 2 issues carry to s3
-    let i4 = db.create_issue_full(
-        "O/OH/F termination relaxations",
-        3.0, "mxene-ox", &Status::Done, None,
-        Some("ISIF=2 relaxation for all three termination types. Compare adsorption energies and surface charge density plots."),
-        None, &dt(27), &dt_done(25), Some(&dt_done(25)),
+    // ── Week -4: training data ────────────────────────────────────────────────
+    let rattle = s.issue(
+        "Rattled and strained structures (300)", 2.0, "dft-dataset", s.t(-5, 4, 10),
+        "±3% strain, 0.05 Å rattles, plus Li vacancies. Keep the generating script in the repo.",
     )?;
-    db.set_issue_sprint(i4, Some(s2))?;
+    s.join(rattle, w4, s.t(-4, 0, 10))?;
+    s.done(rattle, s.t(-4, 0, 11), s.t(-4, 1, 15))?;
 
-    let i5 = db.create_issue_full(
-        "Surface energy vs O coverage",
-        3.0, "mxene-ox", &Status::Done, None,
-        Some("Compute E_surf for 0–100% O coverage in 25% steps. Identify thermodynamic crossover coverage. Plot convex hull."),
-        None, &dt(27), &dt_done(24), Some(&dt_done(24)),
+    let batch1 = s.issue(
+        "VASP single points, training batch 1", 3.0, "dft-dataset", s.t(-4, 0, 9),
+        "300 single points. Check SCF convergence, drop outliers, export to extxyz.",
     )?;
-    db.set_issue_sprint(i5, Some(s2))?;
+    s.join(batch1, w4, s.t(-4, 0, 10))?;
+    s.done(batch1, s.t(-4, 1, 9), s.t(-4, 3, 18))?;
 
-    // This one starts in s2 but gets carried to s3
-    let i6 = db.create_issue_full(
-        "HEA-carbide structure search",
-        3.0, "he-carb", &Status::Done, None,
-        Some("Generate (Ti,Zr,Hf,V,Nb)C SQS supercells via ATAT. Screen 20 configs for lowest DFT total energy. Keep 5 for full relaxation."),
-        None, &dt(28), &dt_done(16), Some(&dt_done(16)),
+    let port = s.issue(
+        "Port analysis scripts to the new pymatgen API", 2.0, "hpc", s.t(-4, 0, 9),
+        "Deprecation warnings everywhere. Not urgent until something actually breaks.",
     )?;
-    db.set_issue_sprint(i6, Some(s2))?;
-    db.set_issue_sprint(i6, Some(s3))?; // carried to s3, completed there
+    s.join(port, w4, s.t(-4, 0, 10))?;
+    s.remove(port, w4, s.t(-4, 2, 14))?;
 
-    // Starts in s2, carries all the way to s4
-    let i7 = db.create_issue_full(
-        "O-termination SI writeup",
-        3.0, "writing", &Status::Done, None,
-        Some("Supporting information: convergence tables, all termination geometry plots, charge density difference maps. ~8 pages."),
-        None, &dt(26), &dt_done(10), Some(&dt_done(10)),
+    let slurm = s.issue(
+        "Fix SLURM array job memory limit", 1.0, "hpc", s.t(-4, 2, 10),
+        "OOM kills on the larger supercells; set --mem-per-cpu per job size.",
     )?;
-    db.set_issue_sprint(i7, Some(s2))?;
-    db.set_issue_sprint(i7, Some(s3))?; // carried
-    db.set_issue_sprint(i7, Some(s4))?; // carried again, finally done
+    s.join(slurm, w4, s.t(-4, 2, 10))?;
+    s.done(slurm, s.t(-4, 2, 10), s.t(-4, 2, 16))?;
 
-    // Sprint 3: AIMD + HEA-carbide deep dive
-    let i8 = db.create_issue_full(
-        "AIMD 300 K Ti3C2 10 ps",
-        5.0, "mxene-ox", &Status::Done, None,
-        Some("NVT Nosé-Hoover, POTIM=2 fs, 5000 steps. Equilibration check via T and P fluctuations. Export XDATCAR for MSD analysis."),
-        None, &dt(21), &dt_done(17), Some(&dt_done(17)),
+    // ── Week -3: first potential ──────────────────────────────────────────────
+    let finetune = s.issue(
+        "Fine-tune MACE on batch 1", 3.0, "mlip", s.t(-4, 3, 10),
+        "Start from the medium foundation model. 80/10/10 split, early stopping on force MAE.",
     )?;
-    db.set_issue_sprint(i8, Some(s3))?;
+    s.join(finetune, w3, s.t(-3, 0, 10))?;
+    s.done(finetune, s.t(-3, 0, 11), s.t(-3, 2, 17))?;
 
-    let i9 = db.create_issue_full(
-        "MSD and diffusion coefficient",
-        2.0, "mxene-ox", &Status::Done, None,
-        Some("Parse XDATCAR with pyiron. Plot mean squared displacement vs time. Extract D via Einstein relation for Ti and C sublattices separately."),
-        None, &dt(19), &dt_done(16), Some(&dt_done(16)),
+    let parity = s.issue(
+        "Parity plots: energies, forces, stresses", 2.0, "mlip", s.t(-3, 0, 9),
+        "Test set only. Report MAE and RMSE per species for forces.",
     )?;
-    db.set_issue_sprint(i9, Some(s3))?;
+    s.join(parity, w3, s.t(-3, 0, 10))?;
+    s.done(parity, s.t(-3, 2, 9), s.t(-3, 3, 15))?;
 
-    let i10 = db.create_issue_full(
-        "HEA-C elastic constants",
-        3.0, "he-carb", &Status::Done, None,
-        Some("IBRION=6 stress-strain in VASP for top-3 SQS configs. Extract C11, C12, C44 tensor. Compare with rule-of-mixtures prediction."),
-        None, &dt(20), &dt_done(9), Some(&dt_done(9)),
+    let referee = s.issue(
+        "Referee report for a journal", 2.0, "reviews", s.t(-3, 0, 9),
+        "Manuscript on ML potentials for oxide interfaces. Check the validation, not just the parity plots.",
     )?;
-    db.set_issue_sprint(i10, Some(s3))?;
-    db.set_issue_sprint(i10, Some(s4))?; // carried to s4, done there
+    s.join(referee, w3, s.t(-3, 0, 10))?;
+    s.carry(referee, w2, -2)?;
+    s.done(referee, s.t(-2, 1, 9), s.t(-2, 2, 12))?;
 
-    let i11 = db.create_issue_full(
-        "NequIP AIMD dataset prep",
-        2.0, "nequip", &Status::Done, None,
-        Some("Extract 5000 frames from Ti3C2 AIMD trajectory. Run single-point VASP for forces and energies. Export to extxyz for NequIP training."),
-        None, &dt(21), &dt_done(18), Some(&dt_done(18)),
+    let outline = s.issue(
+        "MSc student: thesis outline feedback", 1.0, "mentoring", s.t(-3, 0, 9),
+        "",
     )?;
-    db.set_issue_sprint(i11, Some(s3))?;
+    s.join(outline, w3, s.t(-3, 0, 10))?;
+    s.done(outline, s.t(-3, 1, 14), s.t(-3, 1, 16))?;
 
-    // Sprint 4: NequIP training + paper draft
-    let i12 = db.create_issue_full(
-        "NequIP force error < 50 meV/Å",
-        4.0, "nequip", &Status::Done, None,
-        Some("Train NequIP with l_max=2, num_layers=4. Validate on 500-frame holdout. Iterate on cutoff radius (4–6 Å) until RMS force < 50 meV/Å."),
-        None, &dt(14), &dt_done(10), Some(&dt_done(10)),
+    // ── Week -2: active learning ──────────────────────────────────────────────
+    let committee = s.issue(
+        "Active learning: committee disagreement on MD frames", 3.0, "active-learn", s.t(-3, 3, 9),
+        "Five-model committee, pick frames by force disagreement, cap at 150 per round.",
     )?;
-    db.set_issue_sprint(i12, Some(s4))?;
+    s.join(committee, w2, s.t(-2, 0, 10))?;
+    s.done(committee, s.t(-2, 0, 11), s.t(-2, 4, 16))?;
 
-    let i13 = db.create_issue_full(
-        "MXene paper: intro draft",
-        3.0, "writing", &Status::Done, None,
-        Some("~1500 words. Hook: MXene stability limits device lifetimes. Literature gap: atomistic oxidation mechanism unknown. Scope: DFT + AIMD + ML-MD."),
-        None, &dt(14), &dt_done(11), Some(&dt_done(11)),
+    let talk = s.issue(
+        "Group meeting talk: MLIP progress", 2.0, "talks", s.t(-3, 4, 10),
+        "20 minutes. Errors vs. data size, first diffusion numbers, open questions.",
     )?;
-    db.set_issue_sprint(i13, Some(s4))?;
+    s.join(talk, w2, s.t(-2, 0, 10))?;
+    s.done(talk, s.t(-2, 2, 9), s.t(-2, 3, 11))?;
 
-    let i14 = db.create_issue_full(
-        "MXene paper: methods draft",
-        2.0, "writing", &Status::Done, None,
-        Some("DFT setup, pseudopotentials, k-mesh, AIMD protocol, NequIP architecture, validation metrics. Aim for reproducibility."),
-        None, &dt(13), &dt_done(8), Some(&dt_done(8)),
+    let methods = s.issue(
+        "Paper: methods section draft", 3.0, "paper", s.t(-2, 0, 9),
+        "DFT settings, dataset construction, training protocol, active-learning loop. Enough detail to reproduce.",
     )?;
-    db.set_issue_sprint(i14, Some(s4))?;
+    s.join(methods, w2, s.t(-2, 0, 10))?;
+    s.start(methods, s.t(-2, 3, 10))?;
+    s.carry(methods, w1, -1)?;
+    s.done(methods, s.t(-2, 3, 10), s.t(-1, 2, 16))?;
 
-    // ── Active sprint (s5) ────────────────────────────────────────────────────
-    // Done this week
-    let i15 = db.create_issue_full(
-        "HSE06 band gap spot-check",
-        3.0, "mxene-ox", &Status::Done, None,
-        Some("Two representative terminations (O and OH). Compare HSE06 vs PBE band edges at Γ. Confirm metallic/semiconducting character for SI table."),
-        None, &dt(3), &dt_done(2), Some(&dt_done(2)),
+    // ── Week -1: second round ─────────────────────────────────────────────────
+    let batch2 = s.issue(
+        "DFT single points for 120 selected frames", 3.0, "dft-dataset", s.t(-2, 4, 15),
+        "Same settings as batch 1, so the two batches can be merged.",
     )?;
-    db.set_issue_sprint(i15, Some(s5))?;
+    s.join(batch2, w1, s.t(-1, 0, 10))?;
+    s.done(batch2, s.t(-1, 0, 11), s.t(-1, 3, 17))?;
 
-    let i16 = db.create_issue_full(
-        "Revise introduction",
-        2.0, "writing", &Status::Done, None,
-        Some("Incorporate reviewer 2 comments: sharpen gap statement, add 2 recent MXene stability refs (Gogotsi 2024, Anasori 2025)."),
-        None, &dt(3), &dt_done(1), Some(&dt_done(1)),
+    let retrain = s.issue(
+        "Retrain MACE with active-learning round 1", 3.0, "mlip", s.t(-1, 0, 9),
+        "Compare against the batch-1 model on the same test set.",
     )?;
-    db.set_issue_sprint(i16, Some(s5))?;
+    s.join(retrain, w1, s.t(-1, 0, 10))?;
+    s.done(retrain, s.t(-1, 3, 18), s.t(-1, 4, 15))?;
 
-    // In progress
-    let i17 = db.create_issue_full(
-        "HEA-C phonon stability",
-        4.0, "he-carb", &Status::InProgress,
-        Some(date(3)), // due end of sprint
-        Some("Finite-displacement phonon calculation (phonopy) for lowest-energy SQS. Check for imaginary modes at Γ and X. 3×3×3 supercell."),
-        None, &dt(2), &dt(2), None,
+    let diffusion = s.issue(
+        "Li diffusion: MD at 300–700 K with fine-tuned MACE", 5.0, "mlip", s.t(-1, 0, 9),
+        "NVT, 2 ns per temperature, 4×4×4 supercell. MSD → D(T) → Arrhenius fit for the activation energy.",
     )?;
-    db.set_issue_sprint(i17, Some(s5))?;
+    s.join(diffusion, w1, s.t(-1, 0, 10))?;
+    s.start(diffusion, s.t(-1, 4, 9))?;
+    s.carry(diffusion, w0, 0)?;
+    s.due(diffusion, 3)?;
 
-    let i18 = db.create_issue_full(
-        "NequIP 1 ns MD run",
-        5.0, "nequip", &Status::InProgress,
-        Some(date(3)),
-        Some("Deploy trained potential for 1 ns NVT at 300, 600, 900 K. Monitor structural stability and O diffusion coefficient. Compare with DFT AIMD reference."),
-        None, &dt(2), &dt(2), None,
+    let phonopy = s.issue(
+        "Help the student debug a phonopy run", 1.0, "mentoring", s.t(-1, 2, 14),
+        "Imaginary modes at Γ: supercell too small, or forces not converged?",
     )?;
-    db.set_issue_sprint(i18, Some(s5))?;
+    s.join(phonopy, w1, s.t(-1, 2, 14))?;
+    s.done(phonopy, s.t(-1, 2, 14), s.t(-1, 2, 17))?;
 
-    // Todo this sprint
-    let i19 = db.create_issue_full(
-        "Results figures (main text)",
-        3.0, "writing", &Status::Todo,
-        Some(date(2)),
-        Some("4 panels: (1) surface energy convex hull, (2) AIMD MSD, (3) NequIP parity plot, (4) ML-MD O diffusion vs T. High-res PDF, consistent colour scheme."),
-        None, &dt(1), &dt(1), None,
+    // ── Week 0: this sprint ───────────────────────────────────────────────────
+    let aimd = s.issue(
+        "Compare Li diffusivity with an AIMD reference", 3.0, "mlip", s.t(-1, 4, 10),
+        "Same cell, 50 ps AIMD at 700 K as the reference point.",
     )?;
-    db.set_issue_sprint(i19, Some(s5))?;
+    s.join(aimd, w0, s.t(0, 0, 10))?;
+    s.due(aimd, 2)?;
 
-    let i20 = db.create_issue_full(
-        "Group meeting talk",
-        2.0, "writing", &Status::Todo,
-        Some(date(1)),
-        Some("30 min + Q&A. Audience: mixed theory/experiment. Cover motivation, key DFT results, AIMD stability, NequIP validation, outlook."),
-        None, &dt(1), &dt(1), None,
+    let results = s.issue(
+        "Paper: results section, figures 2–4", 3.0, "paper", s.t(-1, 3, 10),
+        "One message per figure. Shared colors for temperatures across panels.",
     )?;
-    db.set_issue_sprint(i20, Some(s5))?;
+    s.join(results, w0, s.t(0, 0, 10))?;
+    s.start(results, s.t(0, 0, 11))?;
+    s.subtask(results, "Fig. 2: parity plots", s.t(0, 0, 11), Some((s.t(0, 0, 11), Some(s.t(0, 0, 16)))))?;
+    s.subtask(results, "Fig. 3: Arrhenius plot", s.t(0, 0, 11), Some((s.t(0, 1, 10), None)))?;
+    s.subtask(results, "Fig. 4: Li-Li radial distribution", s.t(0, 0, 11), None)?;
+    s.due(results, 6)?;
+
+    let compute = s.issue(
+        "Compute time renewal request", 2.0, "proposal", s.t(-2, 1, 9),
+        "Node-hours from last year's usage plus the MD campaign; two pages.",
+    )?;
+    s.join(compute, w0, s.t(0, 0, 10))?;
+    s.done(compute, s.t(0, 0, 11), s.t(0, 1, 12))?;
+
+    let coauthor = s.issue(
+        "Reply to co-author comments on the SI", 1.0, "paper", s.t(0, 0, 9),
+        "",
+    )?;
+    s.join(coauthor, w0, s.t(0, 0, 10))?;
+    s.done(coauthor, s.t(0, 0, 14), s.t(0, 0, 15))?;
+
+    let checkin = s.issue("MSc student: weekly check-in", 1.0, "mentoring", s.t(0, 0, 9), "")?;
+    s.join(checkin, w0, s.t(0, 0, 10))?;
+    s.due(checkin, 1)?;
+
+    let conda = s.issue(
+        "Update conda env (torch, cuequivariance)", 1.0, "hpc", s.t(0, 1, 9),
+        "Pin versions; the GPU nodes got new drivers.",
+    )?;
+    s.join(conda, w0, s.t(0, 1, 9))?;
+    s.done(conda, s.t(0, 1, 9), s.t(0, 1, 11))?;
+
+    let abstract_ = s.issue(
+        "Abstract for the spring meeting", 2.0, "talks", s.t(0, 1, 14),
+        "300 words. Diffusion results only if the AIMD comparison holds up.",
+    )?;
+    s.join(abstract_, w0, s.t(0, 1, 14))?;
+    s.due(abstract_, 5)?;
 
     // ── Backlog ───────────────────────────────────────────────────────────────
-    db.create_issue_full(
-        "Submit to npj Comp. Mater.",
-        3.0, "writing", &Status::Todo,
-        Some(date(14)),
-        Some("Final manuscript assembly: main text + SI + cover letter. Check journal formatting (4000 word limit main text). Submit via editorial manager."),
-        None, &dt(1), &dt(1), None,
+    let vasp = s.issue("Install VASP 6 on the GPU partition", 2.0, "hpc", s.t(-6, 1, 9), "")?;
+    s.done(vasp, s.t(-6, 1, 10), s.t(-6, 2, 17))?;
+    s.issue(
+        "Surface slabs for interface stability", 5.0, "dft-dataset", s.t(-4, 4, 10),
+        "Li metal | Li3PS4 interface: three terminations, six-layer slabs, dipole correction.",
     )?;
-
-    db.create_issue_full(
-        "Phonon dispersion Ti3C2",
-        5.0, "mxene-ox", &Status::Todo,
-        Some(date(21)),
-        Some("DFPT with VASP, 3×3×1 supercell. Compare acoustic branches at Γ with Raman experiment. Check for soft modes near oxidation threshold coverage."),
-        None, &dt(5), &dt(5), None,
+    let lecture = s.issue(
+        "Lecture: DFT for the materials course", 3.0, "teaching", s.t(-3, 1, 10),
+        "90 minutes, from Kohn-Sham to what the INCAR tags mean. One live demo.",
     )?;
-
-    db.create_issue_full(
-        "HEA-C vacancy formation energy",
-        3.0, "he-carb", &Status::Todo,
-        None,
-        Some("C vacancy in top-3 SQS configs. E_vac = E_defect − E_host + μ_C. Compare with binary TiC, ZrC references. Correlate with elastic softening."),
-        None, &dt(10), &dt(10), None,
+    s.due(lecture, 20)?;
+    s.issue(
+        "Benchmark MACE, NequIP and CHGNet on the test set", 5.0, "mlip", s.t(-3, 2, 10),
+        "Same splits and metrics for all three; include inference cost per atom-step.",
     )?;
-
-    db.create_issue_full(
-        "NequIP thermal conductivity",
-        5.0, "nequip", &Status::Todo,
-        None,
-        Some("Green-Kubo heat flux autocorrelation from 10 ns ML-MD trajectory. Compare PBE phonon lifetimes from DFPT. Target: κ vs T for bare and O-terminated MXene."),
-        None, &dt(7), &dt(7), None,
+    s.issue(
+        "Calibrate committee uncertainty", 3.0, "active-learn", s.t(-2, 4, 11),
+        "Is force disagreement a usable error estimate? Plot it against the true error.",
     )?;
+    s.issue("README for the active-learning repo", 2.0, "hpc", s.t(-1, 1, 10), "")?;
 
-    db.create_issue_full(
-        "Postdoc fellowship app",
-        3.0, "admin", &Status::Todo,
-        Some(date(21)),
-        Some("NSF MPS-Ascend or DOE SCGSR. Draft 2-page research statement, CV, 3 reference letters. Align with MXene/ML-MD narrative from current paper."),
-        None, &dt(4), &dt(4), None,
-    )?;
-
-    db.create_issue_full(
-        "Collaborate with XPS group",
-        2.0, "mxene-ox", &Status::Todo,
-        None,
-        Some("Share computed Bader charges and partial DOS near Fermi level. Request Ti 2p and C 1s XPS for direct comparison. Plan co-authorship on follow-up letter."),
-        None, &dt(3), &dt(3), None,
-    )?;
-
+    // Newest first in the backlog, like issues created by hand.
+    db.rerank_by_created_at()?;
+    // Past sprints' finished work stays out of the backlog list (c shows it).
+    db.set_setting("show_completed", "false")?;
     Ok(())
+}
+
+struct Seeder<'a> {
+    db: &'a Db,
+    now: NaiveDateTime,
+    /// Monday of the current week.
+    monday: NaiveDate,
+}
+
+impl<'a> Seeder<'a> {
+    fn new(db: &'a Db) -> Self {
+        let now = Local::now().naive_local();
+        let today = now.date();
+        let monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+        Seeder { db, now, monday }
+    }
+
+    /// `hour` o'clock on weekday `day` (0 = Monday) of the week `week` weeks from this
+    /// one (negative = past). Never later than now, so this week's events stay in the past.
+    fn t(&self, week: i64, day: i64, hour: u32) -> NaiveDateTime {
+        let date = self.monday + Duration::days(7 * week + day);
+        date.and_hms_opt(hour, 0, 0).unwrap_or(self.now).min(self.now)
+    }
+
+    fn ts(t: NaiveDateTime) -> String {
+        t.format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+
+    /// A Monday–Friday sprint, planned on its Monday morning; week 0 is the active one.
+    fn sprint(&self, week: i64) -> Result<i64> {
+        let start = self.monday + Duration::days(7 * week);
+        let name = format!("Week {}", start.iso_week().week());
+        let id = self.db.create_sprint(&name, start, start + Duration::days(4), week == 0)?;
+        self.db.conn().execute(
+            "UPDATE sprints SET created_at = ?1 WHERE id = ?2",
+            params![Self::ts(self.t(week, 0, 9)), id],
+        )?;
+        Ok(id)
+    }
+
+    fn issue(&self, title: &str, sp: f64, epic: &str, created: NaiveDateTime, desc: &str) -> Result<i64> {
+        let c = Self::ts(created);
+        let desc = Some(desc).filter(|d| !d.is_empty());
+        self.db.create_issue_full(title, sp, epic, &Status::Todo, None, desc, None, &c, &c, None)
+    }
+
+    fn due(&self, id: i64, days_from_today: i64) -> Result<()> {
+        self.db.set_issue_due_date(id, self.now.date() + Duration::days(days_from_today))
+    }
+
+    fn start(&self, id: i64, at: NaiveDateTime) -> Result<()> {
+        self.db.conn().execute(
+            "UPDATE issues SET status = 'IN_PROGRESS', started_at = ?1, updated_at = ?1 WHERE id = ?2",
+            params![Self::ts(at), id],
+        )?;
+        Ok(())
+    }
+
+    fn done(&self, id: i64, started: NaiveDateTime, finished: NaiveDateTime) -> Result<()> {
+        self.db.conn().execute(
+            "UPDATE issues SET status = 'DONE', started_at = ?1, completed_at = ?2, updated_at = ?2
+             WHERE id = ?3",
+            params![Self::ts(started), Self::ts(finished), id],
+        )?;
+        Ok(())
+    }
+
+    /// Put an issue into a sprint at `at` (after the sprint's Monday = unplanned scope).
+    fn join(&self, id: i64, sprint: i64, at: NaiveDateTime) -> Result<()> {
+        self.db.conn().execute(
+            "INSERT INTO issue_sprint_log (issue_id, sprint_id, added_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(issue_id, sprint_id) DO UPDATE SET removed_at = NULL",
+            params![id, sprint, Self::ts(at)],
+        )?;
+        self.db.conn().execute("UPDATE issues SET sprint_id = ?1 WHERE id = ?2", params![sprint, id])?;
+        Ok(())
+    }
+
+    /// Carry an unfinished issue into the sprint of week `week`, the way starting that
+    /// sprint does: it joins at the start and gets a carry-over mark.
+    fn carry(&self, id: i64, sprint: i64, week: i64) -> Result<()> {
+        self.join(id, sprint, self.t(week, 0, 0))?;
+        self.db.conn().execute(
+            "UPDATE issues SET carry_count = carry_count + 1 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Take an issue back out of a running sprint.
+    fn remove(&self, id: i64, sprint: i64, at: NaiveDateTime) -> Result<()> {
+        self.db.conn().execute(
+            "UPDATE issue_sprint_log SET removed_at = ?1 WHERE issue_id = ?2 AND sprint_id = ?3",
+            params![Self::ts(at), id, sprint],
+        )?;
+        self.db.conn().execute("UPDATE issues SET sprint_id = NULL WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// A subtask; `progress` is (started, finished) for work that has begun.
+    fn subtask(
+        &self,
+        parent: i64,
+        title: &str,
+        created: NaiveDateTime,
+        progress: Option<(NaiveDateTime, Option<NaiveDateTime>)>,
+    ) -> Result<i64> {
+        let c = Self::ts(created);
+        let id = self.db.create_issue_full(title, 0.0, "", &Status::Todo, None, None, Some(parent), &c, &c, None)?;
+        match progress {
+            Some((started, Some(finished))) => self.done(id, started, finished)?,
+            Some((started, None)) => self.start(id, started)?,
+            None => {}
+        }
+        Ok(id)
+    }
 }

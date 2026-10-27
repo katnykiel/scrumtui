@@ -6,10 +6,94 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [2.1.0] — 2026-10-21
+## [2.4.0] - 2026-10-21
+
+### Changed
+- **One frog a day.** The frog is settled once a day and stays, whether you start it, finish it or leave it: starting it (TODO → IN PROGRESS) no longer swaps in another issue, and finishing it doesn't bring a second one the same day. An unfinished frog carries over to the next day; a finished one is replaced then. `f` makes an issue today's frog, and `f` on the frog means no frog today. A frog pinned in 2.3.0 becomes today's frog.
+- The frog's line in the detail panel no longer suggests adding a first step, and it sits right under the title.
+- **Sprints default to Monday to Friday.** At the weekend, a new sprint is for the coming week. The automatic fix for short sprints now only touches sprints shorter than five days; it used to stretch anything under seven days, which would have rewritten every Monday-to-Friday sprint.
+- Top bar: more space between items. On narrow terminals the sprint summary drops the progress bar and the day count instead of running into the view tabs, and a sprint that hasn't started yet shows its first day.
+- Kanban cards list the frog, carry-over count and due date before the epic, so a narrow column cuts the epic rather than those.
+- The detail panel shows the time spent right after the due date.
+- README screenshots use a smaller terminal (88×28), so their text reads larger.
+
+---
+
+## [2.3.0] - 2026-10-21
 
 ### Added
-- **Colemak layout support**: scrumtui detects the active keyboard layout (macOS input source, or `setxkbmap` on Linux) and, when it's Colemak, remaps navigation so the physical h/j/k/l positions keep working — `n`↔`j`, `e`↔`k`, `i`↔`l` are swapped in navigation contexts (views, lists, status/toggle fields), never in text fields. The layout is re-checked every 2 s, so switching layouts mid-session just works. Override with `SCRUMTUI_LAYOUT=colemak|qwerty`.
+- **New issues from the kanban board**: `n` creates an issue in the active sprint, in the focused column. In the subtask panel, `n` adds a subtask to the shown parent.
+- **Starting the next sprint from the TUI**: once the active sprint has ended, `S` opens a new sprint for the following week, and `Ctrl-N` in the sprint manager switches between "new sprint" and "edit current". The form lists the unfinished issues that saving will carry over. Before, rolling over meant deactivating the old sprint first, which skipped the carry-over.
+- **The frog** (from "eat the frog"): the active sprint's unstarted issue that has been put off the longest (most carry-overs, then oldest, then biggest) is marked `frog` and named on startup. The detail panel says how long it has waited and suggests splitting off a 15-minute first step. `f` pins your own pick; finishing it hands over to the next one.
+- **Sprint history analysis**: planned, added, removed and carried-over scope per sprint; "plan kept" (share of the first-day plan that got done); "carried in → done"; and a breakdown by epic. The issue list shows what happened to each issue in that sprint and can be browsed (`Tab`, then `e` to edit). The sprint list shows a completion bar per sprint, and `n` creates a sprint. On terminals narrower than 110 columns the analysis moves under the issue list.
+- **Top bar** with the four views and the active sprint's progress, or a reminder once it has ended.
+- **Live reload**: changes written by another process (`scrumtui add` from a script or an AI assistant) show up in a running TUI within a second, with a note naming new issues.
+- **CLI**: `edit`, `show`, `add --parent` (subtasks), `-m`/`--desc`, `--backlog`, `list --epic`, `--db=path`, and a due-date column plus a sprint marker in `list`. Due dates accept `today`, `tomorrow` and `none`.
+- `g`/`G`, `Home`/`End` and `PgDn`/`PgUp` in every list: kanban columns and subtasks, trash, epic detail, form subtasks, history. `g`/`G` jump to the top/bottom as in `less` (vim's `gg` works too).
+- A form with unsaved changes asks for a second `Esc` before discarding them.
+- The due-date dropdown suggests today, tomorrow, the end of the sprint and next Monday; "tom" + `Tab` picks tomorrow.
+- `Ctrl-N` adds a subtask from any field of the issue form; `n` adds one inside the subtask list. `↑`/`↓` move between form fields, and `Ctrl-S` also saves the sprint form.
+- Editing an issue from a gantt epic's detail returns to that epic's list.
+- Backlog search also matches subtask titles, and `Esc` clears a kept search filter.
+- `y` (copy) and `f` (frog) on the kanban board.
+- New demo data: six weekly sprints of a computational materials postdoc (DFT training data, fine-tuning a machine-learned potential, active learning, a paper, mentoring, proposals) with carry-overs and scope changes. `scrumtui --db FILE init --demo` keeps it in a file.
+- `cargo test render_readme_snapshots -- --ignored` renders the README screenshots.
+
+### Changed
+- **Help overlay condensed**: each key appears once with its meaning in every view, followed by the few view-specific keys. The README keys section matches it.
+- The selected row highlights only its title, instead of reversing every column into colored blocks.
+- The backlog title column adapts to the terminal width, the detail panel grows to fit the description, and lists keep their scroll position instead of pinning the selection to the bottom edge.
+- Gantt bars use the full width and get a `today` marker.
+- In the kanban subtask panel, `h`/`l` cycle through parents (like `<`/`>`).
+- After `s`, the cursor moves on to the next issue, so repeated `s` pulls a run of issues into the sprint. The same after moving an issue to the trash.
+- `S` (sprint manager) and `T` (trash) work in every view.
+- New sprints are named after their ISO week ("Week 44").
+- No emoji: the trash title and form errors are plain text.
+- The README asks for Rust 1.88+, which the locked dependencies need (1.75 couldn't read the lockfile).
+
+### Fixed
+- **Velocity and done counts in sprint history**: an issue carried from sprint A to B to C and finished in C counted as done in all three. It now counts as done only where it was finished, and as carried over in the others.
+- Issues taken out of a running sprint stayed in its history as if they had been planned. Removals are now recorded and shown, and undoing a sprint toggle restores the history exactly.
+- Scope creep counted issues *created* after the sprint started rather than issues *added* to it after planning. Carried-in issues and issues added on the day a late sprint was set up count as planned.
+- The burnup scope line steps up and down when issues join or leave the sprint.
+- Gantt: the selected epic could scroll off screen, and the date header didn't line up with the bars.
+- Parents whose status rolls up from their subtasks never got a start time, so "actual time" stayed empty.
+- Undoing a status change reset timestamps (undoing Done → In Progress gave the issue a new completion time); undo now restores the previous row exactly.
+- `Tab` in the due-date field didn't complete a typed partial date, and with more than six matches the epic and due-date dropdowns could pick a different entry than the highlighted one.
+- Ctrl-combinations typed letters into text fields (Ctrl-A inserted "a", Ctrl-N in the title inserted "n").
+- The kanban hint advertised `n` and `/`, and the gantt hint `/`, none of which existed there.
+- The detail panel cut off the time line when an issue had a description.
+- Copied (`y`) subtask checklists were in reverse order.
+- Deleting a sprint or purging an issue left rows in the sprint log; fixing short sprints could move a start date later.
+- CLI: invalid `-p`, `-d` or `-s` values silently fell back to defaults, unknown commands opened the TUI, and `status` on a parent with subtasks put it out of sync with them.
+- The CLI and the TUI wait up to 5 s for each other's writes instead of failing with "database is locked".
+- `scrumtui list | head` exits quietly instead of panicking with "Broken pipe".
+- Markdown export lists subtasks in creation order and escapes `|` in titles.
+- Two `scrumtui demo` sessions no longer share (and delete) the same temporary database.
+
+---
+
+## [2.2.0] — 2026-10-21
+
+### Removed
+- **Colemak auto-detection** (2.1.0) reverted. Keys are layout-independent again: `n` new, `e` edit, `h`/`j`/`k`/`l` navigate.
+
+### Added
+- **Arrow keys everywhere navigation happens**: `←`/`↓`/`↑`/`→` work like `h`/`j`/`k`/`l` in every view, the trash list, form status fields, the subtask list and the sprint "active" toggle. Ctrl-arrows work like Ctrl-h/j/k/l: `Ctrl-←`/`Ctrl-→` move an issue between kanban columns, `Ctrl-↑`/`Ctrl-↓` reorder the backlog.
+- **Unfinished sprint issues float to the top**: in the backlog's sprint section and the kanban columns, unfinished issues (TODO / IN PROGRESS) come first, ordered by how long they've been around (most sprint carry-overs first, then oldest). Done issues follow. The order refreshes on view switch, so an issue doesn't jump while you change its status.
+- **Linux clipboard support for `y`**: yank now falls back to `wl-copy`, `xclip` or `xsel` when `pbcopy` isn't available.
+- Unit tests for key handling and sprint ordering (`cargo test`).
+
+### Changed
+- **Burnup legend** moved from the top-right to the bottom-right corner so it no longer covers the lines.
+- Epic / due-date autocomplete dropdowns are navigated with `↑`/`↓` (or `Ctrl-j`/`Ctrl-k`) so plain `j`/`k` can be typed.
+
+### Fixed
+- **Backlog reorder (`Ctrl-j`/`Ctrl-k`) had no visible effect**: issues were listed by `created_at`, ignoring the rank being swapped. The list is now ordered by rank, which matches creation order for unreordered data. New subtasks now get a rank too, so they keep creation order.
+- **Typing `j`/`k` in the epic field** moved the dropdown selection instead of inserting the letter.
+- **Editing a subtask title after removing another subtask** edited the wrong subtask (raw vs. visible index).
+- **Kanban subtask focus** could land on the wrong row after switching columns (used a per-column index for the flat subtask list).
+- Help overlay listed `h`/`l` as "advance / regress" (it's regress / advance) and was missing the reorder keys.
 
 ---
 

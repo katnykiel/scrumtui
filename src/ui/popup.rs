@@ -6,29 +6,38 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Axis, Block, BorderType, Borders, Chart, Clear, Dataset, GraphType, List, ListItem,
-        Paragraph, Wrap,
+        ListState, Paragraph, Wrap,
     },
     Frame,
 };
 
-use crate::app::{App, IssueForm, Popup, SprintForm};
-use crate::models::{format_sp, Issue, Status};
-use crate::ui::backlog::{status_color, status_symbol};
+use crate::app::{App, IssueForm, Popup, SprintForm, DROPDOWN_ROWS, F_DESC, F_DUE, F_EPIC, F_STATUS};
+use crate::models::{format_sp, Issue, Outcome, Sprint, SprintEntry, Status};
+use crate::ui::backlog::{status_color, status_symbol, trunc};
+use crate::ui::hint;
 
 /// Render whichever popup is active on top of the existing frame.
 pub fn render(f: &mut Frame, popup: &Popup, app: &App) {
     match popup {
-        Popup::NewIssue(form) => render_issue_form(f, form, "New Issue", app),
+        Popup::NewIssue(form) => {
+            let title = match (form.sprint_id, &app.active_sprint) {
+                (Some(_), Some(s)) => format!("New issue · {}", s.name),
+                _ => "New issue".to_string(),
+            };
+            render_issue_form(f, form, &title, app);
+        }
         Popup::EditIssue(form) => {
             let title: String = match form.editing_id {
-                Some(id) => format!("Edit Issue  #{id}"),
-                None => "Edit Issue".to_string(),
+                Some(id) => format!("Edit issue #{id}"),
+                None => "Edit issue".to_string(),
             };
             render_issue_form(f, form, &title, app);
         }
         Popup::SprintManager(form) => render_sprint_form(f, form, app),
-        Popup::ConfirmDelete(_, title) => render_confirm_delete(f, title),
-        Popup::ConfirmDeleteSprint(_, name) => render_confirm_delete_sprint(f, name),
+        Popup::ConfirmDelete(_, title) => render_confirm(f, "Move to trash", title, None),
+        Popup::ConfirmDeleteSprint(_, name) => {
+            render_confirm(f, "Delete sprint", name, Some("Its issues stay; they're just unlinked."))
+        }
         Popup::Trash { items, sel } => render_trash(f, items, *sel),
         Popup::Help => render_help(f),
         Popup::GanttEpicDetail { .. } => {} // handled separately in mod.rs
@@ -48,14 +57,33 @@ fn centered_rect(width: u16, height: u16, r: Rect) -> Rect {
     }
 }
 
+fn popup_block(title: &str, color: Color) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(title.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+        ]))
+        .border_style(Style::default().fg(color))
+}
+
+fn error_line(err: &str) -> Paragraph<'static> {
+    Paragraph::new(Line::from(Span::styled(
+        format!("  ! {err}"),
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    )))
+}
+
 // ── Issue form ─────────────────────────────────────────────────────────────────
 
 const FIELD_LABELS: [&str; 6] = [
     "Title",
     "Epic",
-    "Story Points",
+    "Story points",
     "Status",
-    "Due Date (YYYY-MM-DD)",
+    "Due date (YYYY-MM-DD)",
     "Description",
 ];
 
@@ -64,39 +92,27 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
     // header + each subtask row, minimum 3 rows so the section is always visible
     let subtask_section_height: u16 = (2 + visible_subtasks).max(3) as u16;
     // Description field gets more rows when focused so text wraps visibly
-    let desc_height: u16 = if form.focused_field == 5 { 5 } else { 3 };
+    let desc_height: u16 = if form.focused_field == F_DESC && !form.in_subtask_list { 5 } else { 3 };
     let base_height: u16 = 19 + desc_height;
     let total_height = (base_height + subtask_section_height).min(f.area().height.saturating_sub(2));
-    let area = centered_rect(72, total_height, f.area());
+    let area = centered_rect(76, total_height, f.area());
     f.render_widget(Clear, area);
 
-    let bottom_hint = if form.in_subtask_list {
-        " [j/k] nav  [e] edit  [h/l] status  [x] del  [Ctrl+N] add  [Esc] back  [Enter] save "
-    } else if form.focused_field == 5 {
-        " [Tab] next field  [Enter] save  [Esc] cancel "
+    let bottom_hint = if form.in_subtask_list && form.subtask_editing {
+        "[Enter] done  [Tab] next subtask  [Esc] done"
+    } else if form.in_subtask_list {
+        "[j/k] move  [e] rename  [h/l] status  [n] add  [x] remove  [Enter] save  [Esc] back"
+    } else if form.epic_dropdown_open || form.due_date_dropdown_open {
+        "[↑/↓] choose  [Enter/Tab] pick  [Esc] close list"
+    } else if form.focused_field == F_STATUS {
+        "[h/l] status  [Tab] next  [Ctrl-N] subtask  [Enter] save  [Esc] cancel"
     } else {
-        " [Tab/Shift+Tab] field  [h/l] status  [Enter] save  [Esc] cancel "
+        "[Tab/↓] next  [S-Tab/↑] prev  [Ctrl-N] subtask  [Enter] save  [Esc] cancel"
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                title,
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-        ]))
-        .title_bottom(Line::from(Span::styled(
-            bottom_hint,
-            Style::default().fg(Color::DarkGray),
-        )))
+    let block = popup_block(title, Color::Cyan)
+        .title_bottom(hint(bottom_hint))
         .border_style(Style::default().fg(Color::Rgb(100, 100, 180)));
-
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -104,8 +120,8 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // title
-            Constraint::Length(3), // sp
             Constraint::Length(3), // epic
+            Constraint::Length(3), // story points
             Constraint::Length(3), // status
             Constraint::Length(3), // due
             Constraint::Length(desc_height), // desc (taller when focused)
@@ -114,72 +130,32 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
         ])
         .split(inner);
 
-    // When description is focused show raw text (with newlines); otherwise show collapsed preview
-    let desc_display = if form.focused_field == 5 {
-        form.description.clone()
-    } else {
-        form.description.replace('\n', "  ·  ")
-    };
     let values: [String; 6] = [
         form.title.clone(),
         form.epic.clone(),
         form.story_points.clone(),
         Status::from_index(form.status_idx).label().to_string(),
         form.due_date.clone(),
-        desc_display,
+        form.description.clone(),
     ];
 
-    for i in 0..6 {
+    for (i, label) in FIELD_LABELS.iter().enumerate() {
         // Don't show any field as focused when the subtask section has focus
         let is_focused = form.focused_field == i && !form.in_subtask_list;
-        let label = FIELD_LABELS[i];
-
-        let value_display = if i == 5 {
-            // Description: use real terminal cursor, no block cursor char
-            format!(" {}", values[i])
-        } else {
-            let cursor = if is_focused { "▌" } else { "" };
-            format!(" {}{}", values[i], cursor)
-        };
-
-        let field_style = if is_focused {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
         let label_style = if is_focused {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
+        let underline = Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(if is_focused { Color::Cyan } else { Color::DarkGray }));
 
-        let value_style = if i == 3 {
-            let s = Status::from_index(form.status_idx);
-            let sc = match s {
-                Status::Todo => Color::Yellow,
-                Status::InProgress => Color::Cyan,
-                Status::Done => Color::Green,
-            };
-            if is_focused {
-                Style::default().fg(sc).add_modifier(Modifier::BOLD | Modifier::REVERSED)
-            } else {
-                Style::default().fg(sc).add_modifier(Modifier::BOLD)
-            }
-        } else {
-            field_style
-        };
-
-        if i == 5 {
-            // Description: multi-line with word wrap.
-            // When focused, use the terminal's real cursor instead of REVERSED highlight
-            // (REVERSED on a multi-line block looks broken in dark/night-mode terminals).
-            // Iterate over the raw description directly — NOT value_display which already
-            // has a leading space that would double-up when we prefix each line with " ".
-            let mut desc_lines: Vec<Line> = vec![
-                Line::from(Span::styled(format!(" {label}"), label_style)),
-            ];
+        if i == F_DESC {
+            // Description: multi-line with word wrap. When focused, use the terminal's
+            // real cursor instead of a REVERSED highlight (which looks broken on a
+            // multi-line block in dark terminals).
+            let mut desc_lines: Vec<Line> = vec![Line::from(Span::styled(format!(" {label}"), label_style))];
             let desc_src = if is_focused {
                 form.description.clone()
             } else {
@@ -188,25 +164,14 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
             for text_line in desc_src.split('\n') {
                 desc_lines.push(Line::from(Span::styled(
                     format!(" {text_line}"),
-                    if is_focused { Style::default() } else { value_style },
+                    if is_focused { Style::default() } else { Style::default().fg(Color::DarkGray) },
                 )));
             }
             f.render_widget(
-                Paragraph::new(desc_lines)
-                    .wrap(Wrap { trim: false })
-                    .block(
-                        Block::default()
-                            .borders(Borders::BOTTOM)
-                            .border_style(if is_focused {
-                                Style::default().fg(Color::Cyan)
-                            } else {
-                                Style::default().fg(Color::DarkGray)
-                            }),
-                    ),
+                Paragraph::new(desc_lines).wrap(Wrap { trim: false }).block(underline),
                 field_areas[i],
             );
             // Place the real terminal cursor at the end of the last content line.
-            // Use the raw description (not value_display which has extra prefix/cursor chars).
             if is_focused {
                 let raw = &form.description;
                 let last_line_raw = raw.split('\n').last().unwrap_or("");
@@ -219,47 +184,46 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
                     .min(field_areas[i].y + field_areas[i].height.saturating_sub(1));
                 f.set_cursor_position((cx, cy));
             }
-        } else {
-            f.render_widget(
-                Paragraph::new(vec![
-                    Line::from(Span::styled(format!(" {label}"), label_style)),
-                    Line::from(Span::styled(&value_display[..], value_style)),
-                ])
-                .block(
-                    Block::default()
-                        .borders(Borders::BOTTOM)
-                        .border_style(if is_focused {
-                            Style::default().fg(Color::Cyan)
-                        } else {
-                            Style::default().fg(Color::DarkGray)
-                        }),
-                ),
-                field_areas[i],
-            );
+            continue;
         }
-    }
 
-    if let Some(err) = &form.error {
+        let value_line = if i == F_STATUS {
+            let s = Status::from_index(form.status_idx);
+            let style = Style::default().fg(status_color(&s)).add_modifier(Modifier::BOLD);
+            let mut spans = vec![Span::styled(format!(" {} {}", status_symbol(&s), values[i]), style)];
+            if is_focused {
+                spans.push(Span::styled("   ← h  l →", Style::default().fg(Color::DarkGray)));
+            }
+            Line::from(spans)
+        } else {
+            let cursor = if is_focused { "▌" } else { "" };
+            let style = if is_focused { Style::default() } else { Style::default().fg(Color::Gray) };
+            Line::from(vec![
+                Span::styled(format!(" {}", values[i]), style),
+                Span::styled(cursor, Style::default().fg(Color::Cyan)),
+            ])
+        };
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!("  ⚠ {err}"),
-                Style::default().fg(Color::Red),
-            ))),
-            field_areas[6],
+            Paragraph::new(vec![
+                Line::from(Span::styled(format!(" {label}"), label_style)),
+                value_line,
+            ])
+            .block(underline),
+            field_areas[i],
         );
     }
 
-    // ── Subtask list (always shown) ───────────────────────────────────────────────────────
-    render_subtask_list(f, form, field_areas[7]);
-
-    // ── Epic autocomplete dropdown ─────────────────────────────────────────────
-    if form.epic_dropdown_open {
-        render_epic_dropdown(f, form, app, field_areas[1]);
+    if let Some(err) = &form.error {
+        f.render_widget(error_line(err), field_areas[6]);
     }
 
-    // ── Due-date autocomplete dropdown ─────────────────────────────────────────
+    render_subtask_list(f, form, field_areas[7]);
+
+    if form.epic_dropdown_open {
+        render_epic_dropdown(f, form, app, field_areas[F_EPIC]);
+    }
     if form.due_date_dropdown_open {
-        render_due_date_dropdown(f, form, app, field_areas[4]);
+        render_due_date_dropdown(f, form, app, field_areas[F_DUE]);
     }
 }
 
@@ -272,39 +236,41 @@ fn render_subtask_list(f: &mut Frame, form: &IssueForm, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
 
+    let visible: Vec<_> = form.subtasks.iter().filter(|s| !s.deleted).collect();
+    let done = visible.iter().filter(|s| s.status_idx == 2).count();
+    let count = if visible.is_empty() { String::new() } else { format!("{done}/{} ", visible.len()) };
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(Style::default().fg(border_color))
         .title(Line::from(vec![
             Span::styled(" Subtasks ", label_style),
-            Span::styled(
-                if is_focused { "" } else { "[Tab] to focus" },
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(count, Style::default().fg(Color::DarkGray)),
         ]));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
-
     if inner.height == 0 {
         return;
     }
 
-    let visible: Vec<_> = form.subtasks.iter().filter(|s| !s.deleted).collect();
-    let mut lines: Vec<Line> = Vec::new();
-
     if visible.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  (no subtasks)  — Ctrl+N to add one",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        for (vis_idx, st) in visible.iter().enumerate() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  (none)  Ctrl-N adds one",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            inner,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = visible
+        .iter()
+        .enumerate()
+        .map(|(vis_idx, st)| {
             let is_sel = is_focused && vis_idx == form.subtask_sel;
             let status = Status::from_index(st.status_idx);
             let sc = status_color(&status);
-            let sym = status_symbol(&status);
-            let pointer = if is_sel { "▶" } else { " " };
             // Show cursor only when actively editing the title
             let cursor = if is_sel && form.subtask_editing { "▌" } else { "" };
             let row_style = if is_sel && !form.subtask_editing {
@@ -314,777 +280,525 @@ fn render_subtask_list(f: &mut Frame, form: &IssueForm, area: Rect) {
             } else {
                 Style::default()
             };
-            let status_label = status.short();
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {pointer} "), Style::default().fg(Color::Magenta)),
-                Span::styled(format!("{sym} "), Style::default().fg(sc)),
-                Span::styled(
-                    format!("{}{}", st.title, cursor),
-                    row_style,
-                ),
-                Span::styled(
-                    format!("  {status_label}"),
-                    Style::default().fg(sc),
-                ),
-            ]));
-        }
+            ListItem::new(Line::from(vec![
+                Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(Color::Magenta)),
+                Span::styled(format!("{} ", status_symbol(&status)), Style::default().fg(sc)),
+                Span::styled(format!("{}{}", st.title, cursor), row_style),
+                Span::styled(format!("  {}", status.short().trim()), Style::default().fg(sc)),
+            ]))
+        })
+        .collect();
+    let mut state = ListState::default();
+    if is_focused {
+        state.select(Some(form.subtask_sel));
     }
+    f.render_stateful_widget(List::new(items), inner, &mut state);
+}
 
-    f.render_widget(Paragraph::new(lines), inner);
+/// A dropdown list under a form field: (label, hint) rows, `sel` highlighted.
+fn render_dropdown(f: &mut Frame, field_area: Rect, title: &str, rows: &[(String, String)], sel: usize) {
+    let rows = &rows[..rows.len().min(DROPDOWN_ROWS)];
+    if rows.is_empty() {
+        return;
+    }
+    let width = rows
+        .iter()
+        .map(|(v, h)| v.chars().count() + if h.is_empty() { 0 } else { h.len() + 3 })
+        .max()
+        .unwrap_or(10)
+        .saturating_add(4)
+        .max(22)
+        .min(field_area.width as usize) as u16;
+    let drop_area = Rect {
+        x: field_area.x + 2,
+        y: field_area.y + field_area.height,
+        width,
+        height: rows.len() as u16 + 2,
+    };
+    f.render_widget(Clear, drop_area);
+
+    let sel = sel.min(rows.len() - 1);
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (value, hint))| {
+            let style = if i == sel {
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let mut spans = vec![Span::styled(format!(" {value}"), style)];
+            if !hint.is_empty() {
+                spans.push(Span::styled(format!("  {hint}"), Style::default().fg(Color::DarkGray)));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(Span::styled(format!(" {title} "), Style::default().fg(Color::DarkGray))),
+    );
+    f.render_widget(list, drop_area);
+}
+
+fn render_epic_dropdown(f: &mut Frame, form: &IssueForm, app: &App, field_area: Rect) {
+    let rows: Vec<(String, String)> = app
+        .epic_matches(&form.epic)
+        .into_iter()
+        .map(|e| (e, String::new()))
+        .collect();
+    render_dropdown(f, field_area, "epics", &rows, form.epic_dropdown_sel);
+}
+
+fn render_due_date_dropdown(f: &mut Frame, form: &IssueForm, app: &App, field_area: Rect) {
+    let rows = app.due_matches(&form.due_date);
+    render_dropdown(f, field_area, "due date", &rows, form.due_date_dropdown_sel);
 }
 
 // ── Trash popup ──────────────────────────────────────────────────────────────────
 
-fn render_trash(f: &mut Frame, items: &[crate::models::Issue], sel: usize) {
-    let height = (items.len() as u16 + 6).max(10).min(f.area().height.saturating_sub(4));
-    let area = centered_rect(68, height, f.area());
+fn render_trash(f: &mut Frame, items: &[Issue], sel: usize) {
+    let height = (items.len() as u16 + 4).clamp(8, f.area().height.saturating_sub(4));
+    let area = centered_rect(70, height, f.area());
     f.render_widget(Clear, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled("🗑  Trash", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-        ]))
-        .title_bottom(Line::from(Span::styled(
-            " [r] restore  [D] purge permanently  [Esc] close ",
-            Style::default().fg(Color::DarkGray),
-        )))
-        .border_style(Style::default().fg(Color::Red));
-
+    let block = popup_block("Trash", Color::Red)
+        .title_bottom(hint("[r] restore  [D] delete forever  [Esc] close"));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if items.is_empty() {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "  Trash is empty.",
-                Style::default().fg(Color::DarkGray),
-            ))),
+            Paragraph::new(Line::from(Span::styled("  Trash is empty.", Style::default().fg(Color::DarkGray)))),
             inner,
         );
         return;
     }
 
-    use crate::ui::backlog::trunc;
+    let title_w = (inner.width as usize).saturating_sub(22);
     let list_items: Vec<ListItem> = items
         .iter()
         .enumerate()
         .map(|(i, issue)| {
             let is_sel = i == sel;
-            let pointer = if is_sel { "▶" } else { " " };
             let style = if is_sel {
                 Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
             } else {
                 Style::default()
             };
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" {pointer} "), Style::default().fg(Color::Red)),
-                Span::styled(
-                    format!("{:<44}", trunc(&issue.title, 44)),
-                    style,
-                ),
-                Span::styled(
-                    format!("  {:<14}", trunc(&issue.epic, 14)),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(Color::Red)),
+                Span::styled(format!("{:<title_w$}", trunc(&issue.title, title_w)), style),
+                Span::styled(format!("  {:<14}", trunc(&issue.epic, 14)), Style::default().fg(Color::DarkGray)),
             ]))
         })
         .collect();
 
-    let mut state = ratatui::widgets::ListState::default();
-    state.select(Some(sel));
-    let list = List::new(list_items)
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
-    f.render_stateful_widget(list, inner, &mut state);
-}
-
-fn render_epic_dropdown(f: &mut Frame, form: &IssueForm, app: &App, epic_field_area: Rect) {
-    let q = form.epic.to_lowercase();
-    let matches: Vec<&String> = app
-        .epics()
-        .iter()
-        .filter(|e| e.to_lowercase().contains(&q))
-        .collect();
-
-    if matches.is_empty() {
-        return;
-    }
-
-    let max_items = 6usize;
-    let visible: Vec<&&String> = matches.iter().take(max_items).collect();
-    let height = visible.len() as u16 + 2; // +2 for border
-    let width = (visible.iter().map(|e| e.len()).max().unwrap_or(10) + 4)
-        .max(20)
-        .min(epic_field_area.width as usize) as u16;
-
-    let drop_area = Rect {
-        x: epic_field_area.x + 2,
-        y: epic_field_area.y + epic_field_area.height,
-        width,
-        height,
-    };
-
-    f.render_widget(Clear, drop_area);
-
-    let sel = form.epic_dropdown_sel.min(visible.len().saturating_sub(1));
-    let items: Vec<ListItem> = visible
-        .iter()
-        .enumerate()
-        .map(|(i, epic)| {
-            let is_sel = i == sel;
-            ListItem::new(Line::from(Span::styled(
-                format!(" {epic}"),
-                if is_sel {
-                    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
-                } else {
-                    Style::default()
-                },
-            )))
-        })
-        .collect();
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(Span::styled(" epics ", Style::default().fg(Color::DarkGray))),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-
-    let mut state = ratatui::widgets::ListState::default();
-    state.select(Some(sel));
-    f.render_stateful_widget(list, drop_area, &mut state);
-}
-
-fn render_due_date_dropdown(f: &mut Frame, form: &IssueForm, app: &App, field_area: Rect) {
-    let q = form.due_date.to_lowercase();
-    let matches: Vec<String> = app
-        .due_dates()
-        .into_iter()
-        .filter(|d| d.contains(&q))
-        .collect();
-
-    if matches.is_empty() {
-        return;
-    }
-
-    let max_items = 6usize;
-    let visible: Vec<&String> = matches.iter().take(max_items).collect();
-    let height = visible.len() as u16 + 2;
-    let width = (visible.iter().map(|d| d.len()).max().unwrap_or(10) + 4)
-        .max(20)
-        .min(field_area.width as usize) as u16;
-
-    let drop_area = Rect {
-        x: field_area.x + 2,
-        y: field_area.y + field_area.height,
-        width,
-        height,
-    };
-
-    f.render_widget(Clear, drop_area);
-
-    let sel = form.due_date_dropdown_sel.min(visible.len().saturating_sub(1));
-    let items: Vec<ListItem> = visible
-        .iter()
-        .enumerate()
-        .map(|(i, date)| {
-            let is_sel = i == sel;
-            let label = if app.today_str() == **date {
-                format!(" {date}  ← today")
-            } else {
-                format!(" {date}")
-            };
-            ListItem::new(Line::from(Span::styled(
-                label,
-                if is_sel {
-                    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
-                } else {
-                    Style::default()
-                },
-            )))
-        })
-        .collect();
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(Span::styled(" due dates ", Style::default().fg(Color::DarkGray))),
-        )
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-
-    let mut state = ratatui::widgets::ListState::default();
-    state.select(Some(sel));
-    f.render_stateful_widget(list, drop_area, &mut state);
+    let mut state = ListState::default().with_selected(Some(sel));
+    f.render_stateful_widget(List::new(list_items), inner, &mut state);
 }
 
 // ── Sprint form ────────────────────────────────────────────────────────────────
 
 fn render_sprint_form(f: &mut Frame, form: &SprintForm, app: &App) {
-    let area = centered_rect(92, 26, f.area());
+    let area = centered_rect(96, 24, f.area());
     f.render_widget(Clear, area);
 
-    let popup_title = if form.editing_id.is_some() {
-        "Edit Sprint"
-    } else {
-        "New Sprint"
+    let is_new = form.editing_id.is_none();
+    let toggle_hint = match (is_new, &app.active_sprint) {
+        (true, Some(_)) => "[Ctrl-N] edit current sprint  ",
+        (false, _) => "[Ctrl-N] new sprint  ",
+        (true, None) => "",
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                popup_title,
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-        ]))
-        .title_bottom(Line::from(Span::styled(
-            " [Tab] next  [Enter] save  [Esc] cancel ",
-            Style::default().fg(Color::DarkGray),
-        )))
-        .border_style(Style::default().fg(Color::Magenta));
-
+    let block = popup_block(if is_new { "New sprint" } else { "Edit sprint" }, Color::Magenta)
+        .title_bottom(hint(&format!("[Tab] next  [Enter] save  {toggle_hint}[Esc] cancel")));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Split inner horizontally: left=form, right=burndown chart
+    // Left: form fields; right: burnup chart (editing) or what saving will do (new)
     let h_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(38), Constraint::Min(10)])
         .split(inner);
 
-    // ── Left: form fields ──────────────────────────────────────────────────────
-
-    let field_constraints: Vec<Constraint> = (0..5)
-        .map(|i| {
-            if i < 4 {
-                Constraint::Length(3)
-            } else {
-                Constraint::Min(1)
-            }
-        })
-        .collect();
-
     let field_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(field_constraints)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(1),
+        ])
         .split(h_chunks[0]);
 
-    let fields: [(&str, String, bool); 4] = [
-        ("Name", form.name.clone(), false),
-        ("Start  (YYYY-MM-DD)", form.start_date.clone(), false),
-        ("End    (YYYY-MM-DD)", form.end_date.clone(), false),
-        ("Active", if form.is_active { "✓ yes" } else { "✗ no" }.to_string(), true),
+    let fields: [(&str, String); 4] = [
+        ("Name", form.name.clone()),
+        ("Start (YYYY-MM-DD)", form.start_date.clone()),
+        ("End (YYYY-MM-DD)", form.end_date.clone()),
+        ("Active", String::new()),
     ];
-
-    for (i, (label, value, is_bool)) in fields.iter().enumerate() {
+    for (i, (label, value)) in fields.iter().enumerate() {
         let is_focused = form.focused_field == i;
-        let cursor = if is_focused && !is_bool { "▌" } else { "" };
-        let display = if *is_bool {
-            format!(" {value}  [space] toggle")
-        } else {
-            format!(" {value}{cursor}")
-        };
-
-        let field_style = if is_focused {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
         let label_style = if is_focused {
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let bool_style = if *is_bool && form.is_active {
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD)
-        } else if *is_bool {
-            Style::default().fg(Color::DarkGray)
+        let value_line = if i == 3 {
+            let mut spans = vec![if form.is_active {
+                Span::styled(" ✓ yes", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(" ✗ no", Style::default().fg(Color::DarkGray))
+            }];
+            if is_focused {
+                spans.push(Span::styled("   space toggles", Style::default().fg(Color::DarkGray)));
+            }
+            Line::from(spans)
         } else {
-            field_style
-        };
-
-        f.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(format!(" {label}"), label_style)),
-                Line::from(Span::styled(
-                    &display[..],
-                    if *is_bool { bool_style } else { field_style },
-                )),
+            let style = if is_focused { Style::default() } else { Style::default().fg(Color::Gray) };
+            Line::from(vec![
+                Span::styled(format!(" {value}"), style),
+                Span::styled(if is_focused { "▌" } else { "" }, Style::default().fg(Color::Magenta)),
             ])
-            .block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_style(if is_focused {
-                        Style::default().fg(Color::Magenta)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    }),
-            ),
+        };
+        f.render_widget(
+            Paragraph::new(vec![Line::from(Span::styled(format!(" {label}"), label_style)), value_line])
+                .block(
+                    Block::default()
+                        .borders(Borders::BOTTOM)
+                        .border_style(Style::default().fg(if is_focused { Color::Magenta } else { Color::DarkGray })),
+                ),
             field_chunks[i],
         );
     }
 
     if let Some(err) = &form.error {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!("  ⚠ {err}"),
-                Style::default().fg(Color::Red),
-            ))),
-            field_chunks[4],
-        );
+        f.render_widget(error_line(err), field_chunks[4]);
     }
 
-    // ── Right: burnup chart ───────────────────────────────────────────────────
-    let chart_area = h_chunks[1];
-    if let Some(sprint_id) = form.editing_id {
-        let start = chrono::NaiveDate::parse_from_str(&form.start_date, "%Y-%m-%d").ok();
-        let end   = chrono::NaiveDate::parse_from_str(&form.end_date,   "%Y-%m-%d").ok();
-        if let (Some(start), Some(end)) = (start, end) {
-            let sprint_issues: Vec<&Issue> = app
-                .issues
-                .iter()
-                .filter(|i| i.sprint_id == Some(sprint_id))
-                .collect();
-            render_burnup_chart(f, start, end, &sprint_issues, chart_area);
-            return;
-        }
+    let side = h_chunks[1];
+    if let Some(sprint) = &form.sprint {
+        render_burnup_chart(f, sprint, &form.entries, side);
+        return;
     }
-    // Fallback: no sprint selected yet
+
+    // New sprint: say what saving will do.
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines = vec![Line::from("")];
+    let carried: Vec<&Issue> = match (&app.active_sprint, form.is_active) {
+        (Some(old), true) => app
+            .issues
+            .iter()
+            .filter(|i| i.sprint_id == Some(old.id) && i.parent_id.is_none() && i.status != Status::Done)
+            .collect(),
+        _ => Vec::new(),
+    };
+    match (&app.active_sprint, form.is_active) {
+        (Some(old), true) => {
+            lines.push(Line::from(Span::styled(
+                format!("  Saving ends {} and starts this sprint.", old.name),
+                Style::default().fg(Color::Gray),
+            )));
+            if carried.is_empty() {
+                lines.push(Line::from(Span::styled("  Nothing unfinished to carry over.", dim)));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!("  Carried over ({}), each marked ↩:", carried.len()),
+                    dim,
+                )));
+                let w = (side.width as usize).saturating_sub(12);
+                let room = (side.height as usize).saturating_sub(5);
+                for issue in carried.iter().take(room) {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("   {} ", status_symbol(&issue.status)), Style::default().fg(status_color(&issue.status))),
+                        Span::styled(trunc(&issue.title, w), Style::default()),
+                        Span::styled(format!(" {}sp", format_sp(issue.story_points)), Style::default().fg(Color::Magenta)),
+                    ]));
+                }
+                if carried.len() > room {
+                    lines.push(Line::from(Span::styled(format!("   … and {} more", carried.len() - room), dim)));
+                }
+            }
+        }
+        (None, true) => lines.push(Line::from(Span::styled(
+            "  Saving starts this sprint. Then press s on backlog issues to pull them in.",
+            Style::default().fg(Color::Gray),
+        ))),
+        (_, false) => lines.push(Line::from(Span::styled(
+            "  Saved as an inactive sprint (for planning or record keeping).",
+            dim,
+        ))),
+    }
     f.render_widget(
-        Paragraph::new(vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "  No active sprint.",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(Span::styled(
-                "  Save to create one.",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ])
-        .block(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .title(Span::styled(" burnup ", Style::default().fg(Color::DarkGray)))
                 .border_style(Style::default().fg(Color::Rgb(80, 60, 100))),
         ),
-        chart_area,
+        side,
     );
 }
 
-/// Compute burnup chart data from a sprint's date range and its issues.
-///
-/// Returns (scope_line, ideal_line, actual_line, total_sp, sprint_days) where:
-/// - scope_line: step function — starts at initial SP, steps up as issues are added mid-sprint
-/// - ideal_line: straight line from (0, 0) to (sprint_days, total_sp) — perfect steady pace
-/// - actual_line: completed SP step function — starts at 0, steps up as issues are marked Done
-///
-/// All three lines have non-negative slopes. X axis is fractional days from sprint start.
-pub fn compute_burnup_for(
-    start: chrono::NaiveDate,
-    end: chrono::NaiveDate,
-    issues: &[&Issue],
-) -> Option<(Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>, f64, f64)> {
-    if end <= start {
-        return None;
-    }
-
-    let total_sp: f64 = issues.iter().map(|i| i.story_points).sum();
-    if total_sp <= 0.0 {
-        return None;
-    }
-
-    let sprint_days = (end - start).num_days() as f64;
-    let start_dt: NaiveDateTime = start.and_hms_opt(0, 0, 0).unwrap();
-
-    // Scope line: step function that increases as issues are added during the sprint.
-    // Issues created before sprint start count from day 0; those created mid-sprint
-    // add their SP at their creation timestamp.
-    let now = Local::now().naive_local();
-    let sprint_end_dt: NaiveDateTime = end.and_hms_opt(23, 59, 59).unwrap();
-    let scope = {
-        // Separate issues into "already in scope at start" vs "added mid-sprint"
-        let mut initial_sp: f64 = 0.0;
-        let mut additions: Vec<(f64, f64)> = Vec::new();
-        for i in issues.iter() {
-            let frac = (i.created_at - start_dt).num_seconds() as f64 / 86400.0;
-            if frac <= 0.0 {
-                initial_sp += i.story_points;
-            } else {
-                additions.push((frac.min(sprint_days), i.story_points));
-            }
-        }
-        additions.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        let mut scope: Vec<(f64, f64)> = Vec::new();
-        let mut running = initial_sp;
-        scope.push((0.0, running));
-        for (x, sp) in &additions {
-            scope.push((*x, running));
-            running += sp;
-            scope.push((*x, running));
-        }
-        // Extend to current time (or end of sprint)
-        let current_x = {
-            let cx = (now.min(sprint_end_dt) - start_dt).num_seconds() as f64 / 86400.0;
-            cx.clamp(0.0, sprint_days)
-        };
-        if scope.last().map(|(x, _)| *x).unwrap_or(0.0) < current_x {
-            scope.push((current_x, running));
-        }
-        scope
-    };
-
-    // Ideal burnup: straight line from (0, 0) to (sprint_days, total_sp)
-    let ideal: Vec<(f64, f64)> = vec![(0.0, 0.0), (sprint_days, total_sp)];
-
-    // Actual burnup: step function of completed story points.
-    // Starts at 0 and steps up each time an issue is marked Done.
-    let cutoff = now.min(sprint_end_dt);
-
-    // Gather completion events within sprint window
-    let mut events: Vec<(f64, f64)> = issues
-        .iter()
-        .filter_map(|i| {
-            if i.status == Status::Done {
-                i.completed_at.and_then(|c| {
-                    if c <= cutoff {
-                        let frac_days = (c - start_dt).num_seconds() as f64 / 86400.0;
-                        // Only count completions within the sprint window (0..=sprint_days)
-                        if frac_days >= 0.0 {
-                            Some((frac_days.min(sprint_days), i.story_points))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // Sort by time
-    events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Build step function: start at 0, add SP at each completion moment
-    let mut actual: Vec<(f64, f64)> = Vec::new();
-    let mut completed = 0.0_f64;
-    actual.push((0.0, completed));
-    for (x, sp) in &events {
-        // Horizontal segment up to the step, then jump up
-        actual.push((*x, completed));
-        completed += sp;
-        actual.push((*x, completed));
-    }
-    // Extend to current time (or end of sprint)
-    let current_x = {
-        let cx = (now - start_dt).num_seconds() as f64 / 86400.0;
-        cx.clamp(0.0, sprint_days)
-    };
-    if actual.last().map(|(x, _)| *x).unwrap_or(0.0) < current_x {
-        actual.push((current_x, completed));
-    }
-
-    Some((scope, ideal, actual, total_sp, sprint_days))
+/// Burnup series for one sprint, x in days since the start of its first day.
+struct Burnup {
+    scope: Vec<(f64, f64)>,
+    ideal: Vec<(f64, f64)>,
+    actual: Vec<(f64, f64)>,
+    max_scope: f64,
+    days: f64,
 }
 
-/// Render a burndown chart for any sprint given its dates and issues.
-/// Used by both the sprint manager popup and the history view.
-pub fn render_burnup_chart(
-    f: &mut Frame,
-    start: chrono::NaiveDate,
-    end: chrono::NaiveDate,
-    issues: &[&Issue],
-    area: Rect,
-) {
+/// Compute the burnup lines of a sprint from its membership log:
+/// - scope: steps up when an issue joins after planning, down when one is removed
+/// - ideal: straight line from 0 to the current scope at the end of the sprint
+/// - actual: done story points, stepping up at each completion
+fn compute_burnup(sprint: &Sprint, entries: &[SprintEntry]) -> Option<Burnup> {
+    let days = sprint.duration_days() as f64;
+    let start: NaiveDateTime = sprint.start_date.and_hms_opt(0, 0, 0)?;
+    let x_of = |t: NaiveDateTime| ((t - start).num_seconds() as f64 / 86400.0).clamp(0.0, days);
+    let now_x = x_of(Local::now().naive_local());
+
+    // Scope events: (x, delta)
+    let mut initial = 0.0;
+    let mut changes: Vec<(f64, f64)> = Vec::new();
+    for e in entries {
+        let sp = e.issue.story_points;
+        if e.added_mid_sprint(sprint) {
+            changes.push((x_of(e.joined_at(sprint)), sp));
+        } else {
+            initial += sp;
+        }
+        if let (Outcome::Removed, Some(removed)) = (e.outcome, e.removed_at) {
+            changes.push((x_of(removed), -sp));
+        }
+    }
+    changes.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut scope = vec![(0.0, initial)];
+    let mut running = initial;
+    let mut max_scope = initial;
+    for (x, delta) in changes {
+        scope.push((x, running));
+        running += delta;
+        scope.push((x, running));
+        max_scope = max_scope.max(running);
+    }
+    if scope.last().map_or(0.0, |p| p.0) < now_x {
+        scope.push((now_x, running));
+    }
+    if max_scope <= 0.0 {
+        return None;
+    }
+
+    let mut done_events: Vec<(f64, f64)> = entries
+        .iter()
+        .filter(|e| e.outcome == Outcome::Done)
+        .filter_map(|e| e.issue.completed_at.map(|c| (x_of(c), e.issue.story_points)))
+        .collect();
+    done_events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut actual = vec![(0.0, 0.0)];
+    let mut done = 0.0;
+    for (x, sp) in done_events {
+        actual.push((x, done));
+        done += sp;
+        actual.push((x, done));
+    }
+    if actual.last().map_or(0.0, |p| p.0) < now_x {
+        actual.push((now_x, done));
+    }
+
+    Some(Burnup {
+        scope,
+        ideal: vec![(0.0, 0.0), (days, running.max(0.0))],
+        actual,
+        max_scope,
+        days,
+    })
+}
+
+/// Render the burnup chart of a sprint (used by the sprint manager and the history view).
+pub fn render_burnup_chart(f: &mut Frame, sprint: &Sprint, entries: &[SprintEntry], area: Rect) {
     let chart_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(Span::styled(
-            " burnup ",
-            Style::default().fg(Color::DarkGray),
-        ))
+        .title(Span::styled(" burnup ", Style::default().fg(Color::DarkGray)))
         .border_style(Style::default().fg(Color::Rgb(80, 60, 100)));
 
-    match compute_burnup_for(start, end, issues) {
-        None => {
-            f.render_widget(
-                Paragraph::new(vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "  No story points in sprint.",
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                ])
-                .block(chart_block),
-                area,
-            );
-        }
-        Some((scope, ideal, actual, total_sp, sprint_days)) => {
-            let y_max = total_sp * 1.1;
-            let x_max = sprint_days;
+    let Some(b) = compute_burnup(sprint, entries) else {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled("  No story points in this sprint.", Style::default().fg(Color::DarkGray))),
+            ])
+            .block(chart_block),
+            area,
+        );
+        return;
+    };
 
-            let mid_day = (sprint_days / 2.0).round() as i64;
-            let x_labels = vec![
-                Span::styled("d0", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("d{mid_day}"),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("d{}", sprint_days as i64),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ];
-            let y_labels = vec![
-                Span::styled("0", Style::default().fg(Color::Green)),
-                Span::styled(
-                    format_sp(total_sp / 2.0),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format_sp(total_sp),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ];
+    let dim = Style::default().fg(Color::DarkGray);
+    let x_labels = vec![
+        Span::styled(sprint.start_date.format("%a %d").to_string(), dim),
+        Span::styled(sprint.end_date.format("%a %d").to_string(), dim),
+    ];
+    let y_labels = vec![
+        Span::styled("0", dim),
+        Span::styled(format_sp(b.max_scope / 2.0), dim),
+        Span::styled(format_sp(b.max_scope), Style::default().fg(Color::Yellow)),
+    ];
+    let datasets = vec![
+        Dataset::default()
+            .name("scope")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Yellow))
+            .data(&b.scope),
+        Dataset::default()
+            .name("ideal")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Rgb(120, 120, 120)))
+            .data(&b.ideal),
+        Dataset::default()
+            .name("done")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Cyan))
+            .data(&b.actual),
+    ];
 
-            let datasets = vec![
-                Dataset::default()
-                    .name("scope")
-                    .marker(symbols::Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(Style::default().fg(Color::Yellow))
-                    .data(&scope),
-                Dataset::default()
-                    .name("ideal")
-                    .marker(symbols::Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(Style::default().fg(Color::Rgb(120, 120, 120)))
-                    .data(&ideal),
-                Dataset::default()
-                    .name("actual")
-                    .marker(symbols::Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(Style::default().fg(Color::Cyan))
-                    .data(&actual),
-            ];
+    // Burnup lines rise toward the top-right, so keep the legend out of their way.
+    let chart = Chart::new(datasets)
+        .block(chart_block)
+        .legend_position(Some(ratatui::widgets::LegendPosition::BottomRight))
+        // Keep the legend in smaller charts too (the default hides it below ~40 rows).
+        .hidden_legend_constraints((Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)))
+        .x_axis(Axis::default().bounds([0.0, b.days]).labels(x_labels).style(dim))
+        .y_axis(Axis::default().bounds([0.0, b.max_scope * 1.1]).labels(y_labels).style(dim));
+    f.render_widget(chart, area);
+}
 
-            let chart = Chart::new(datasets)
-                .block(chart_block)
-                .x_axis(
-                    Axis::default()
-                        .bounds([0.0, x_max])
-                        .labels(x_labels)
-                        .style(Style::default().fg(Color::DarkGray)),
-                )
-                .y_axis(
-                    Axis::default()
-                        .bounds([0.0, y_max])
-                        .labels(y_labels)
-                        .style(Style::default().fg(Color::DarkGray)),
-                );
+// ── Confirm dialogs ────────────────────────────────────────────────────────────
 
-            f.render_widget(chart, area);
-        }
+fn render_confirm(f: &mut Frame, title: &str, subject: &str, note: Option<&str>) {
+    let area = centered_rect(60, if note.is_some() { 8 } else { 7 }, f.area());
+    f.render_widget(Clear, area);
+    let block = popup_block(title, Color::Red);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let width = (inner.width as usize).saturating_sub(4);
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(format!("  {}", trunc(subject, width)), Style::default().add_modifier(Modifier::BOLD))),
+    ];
+    if let Some(note) = note {
+        lines.push(Line::from(Span::styled(format!("  {note}"), Style::default().fg(Color::DarkGray))));
     }
-}
-
-// ── Confirm delete ─────────────────────────────────────────────────────────────
-
-fn render_confirm_delete(f: &mut Frame, title: &str) {
-    let area = centered_rect(52, 7, f.area());
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                "Move to Trash",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-        ]))
-        .border_style(Style::default().fg(Color::Red));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  Trash: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                title,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  [d] confirm    [n / Esc] cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-fn render_confirm_delete_sprint(f: &mut Frame, name: &str) {
-    let area = centered_rect(60, 8, f.area());
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                "Delete Sprint",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-        ]))
-        .border_style(Style::default().fg(Color::Red));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  Delete: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                name,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(Span::styled(
-            "  Issues will be unlinked (not deleted).",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  [d] confirm    [n / Esc] cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  [d]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::styled(" confirm    ", Style::default().fg(Color::DarkGray)),
+        Span::styled("[n / Esc]", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+    ]));
     f.render_widget(Paragraph::new(lines), inner);
 }
 
 // ── Help ───────────────────────────────────────────────────────────────────────
 
+/// (keys, description) rows; a row with empty keys starts a section.
+/// Keys mean the same thing in every view, so each is listed once.
+const HELP_LEFT: &[(&str, &str)] = &[
+    ("", "EVERYWHERE"),
+    ("1 2 3 4", "switch view"),
+    ("j k   ↓ ↑", "move"),
+    ("g G   Home End", "top / bottom"),
+    ("PgDn PgUp", "page"),
+    ("h l   ← →", "status (kanban: column)"),
+    ("Tab", "next panel / field"),
+    ("n", "new"),
+    ("e   Enter", "edit / open"),
+    ("d", "delete"),
+    ("/   Esc", "search · clear / back"),
+    ("f", "pin / unpin the frog"),
+    ("y", "copy issue to clipboard"),
+    ("u", "undo"),
+    ("S   T", "sprint manager · trash"),
+    ("?   q", "help · quit"),
+];
+
+const HELP_RIGHT: &[(&str, &str)] = &[
+    ("", "BACKLOG"),
+    ("s", "into / out of the sprint"),
+    ("Ctrl-J/K", "reorder"),
+    ("c", "show / hide done"),
+    ("", "KANBAN"),
+    ("Ctrl-H/L", "move card left / right"),
+    ("", "FORMS"),
+    ("Enter   Ctrl-S", "save"),
+    ("Esc", "cancel (twice if changed)"),
+    ("Ctrl-N   x", "add · remove subtask"),
+    ("Del", "clear due date"),
+    ("", "SPRINT MANAGER"),
+    ("Ctrl-N", "new sprint ↔ edit current"),
+    ("", "TRASH"),
+    ("r   D", "restore · delete forever"),
+];
+
+fn help_lines(rows: &[(&str, &str)]) -> Vec<Line<'static>> {
+    rows.iter()
+        .map(|(keys, desc)| {
+            if keys.is_empty() {
+                Line::from(Span::styled(
+                    format!("  {desc}"),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(vec![
+                    Span::styled(format!("  {keys:<17}"), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::raw(desc.to_string()),
+                ])
+            }
+        })
+        .collect()
+}
+
 fn render_help(f: &mut Frame) {
-    let area = centered_rect(62, 32, f.area());
+    let two_columns = f.area().width >= 96;
+    let rows = HELP_LEFT.len().max(HELP_RIGHT.len());
+    let (width, height) = if two_columns {
+        (94, rows as u16 + 3)
+    } else {
+        (56, (HELP_LEFT.len() + HELP_RIGHT.len()) as u16 + 3)
+    };
+    let area = centered_rect(width, height, f.area());
     f.render_widget(Clear, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                "Help",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-        ]))
-        .title_bottom(Line::from(Span::styled(
-            " [Esc / q / ?] close ",
-            Style::default().fg(Color::DarkGray),
-        )))
+    let block = popup_block("Keys", Color::Cyan)
+        .title_bottom(hint("[Esc / q / ?] close"))
         .border_style(Style::default().fg(Color::Rgb(80, 80, 120)));
-
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let key = |k: &'static str, desc: &'static str| -> Line<'static> {
-        Line::from(vec![
-            Span::styled(
-                format!("  {k:<22}"),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(desc, Style::default()),
-        ])
-    };
-    let sep = || -> Line<'static> { Line::from("") };
-    let hdr = |t: &'static str| -> Line<'static> {
-        Line::from(Span::styled(
-            format!("  ── {t} "),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        ))
-    };
-
-    let lines = vec![
-        sep(),
-        hdr("GLOBAL"),
-        key("j / k", "Navigate up / down"),
-        key("g / G", "Jump to top / bottom"),
-        key("PgDn / PgUp", "Page down / up (10 items)"),
-        key("h / l", "Advance / regress status  (backlog)"),
-        key("e", "Edit selected issue"),
-        key("n", "New issue"),
-        key("u  /  ?", "Undo  /  Help"),
-        key("q  /  Esc", "Quit  /  Cancel / back"),
-        key("1 / 2 / 3 / 4", "Backlog / Kanban / Gantt / History"),
-        sep(),
-        hdr("BACKLOG"),
-        key("d  /  T", "Trash issue  /  open trash"),
-        key("s  /  S", "Toggle sprint  /  sprint manager"),
-        key("c", "Toggle show completed"),
-        key("y", "Yank issue to clipboard"),
-        key("/", "Search"),
-        sep(),
-        hdr("KANBAN"),
-        key("h / l", "Navigate column left / right"),
-        key("Ctrl-H / Ctrl-L", "Move issue to prev / next column"),
-        key("Tab", "Parent ↔ subtask panel"),
-        key("< / >", "Cycle parent in subtask panel"),
-        sep(),
-        hdr("FORMS"),
-        key("Tab / Shift-Tab", "Next / previous field"),
-        key("h / l", "Advance / regress status (or subtask)"),
-        key("Del", "Clear due date field"),
-        key("Ctrl-N", "Add subtask"),
-        key("x", "Remove subtask"),
-        key("Ctrl-S", "Save from any field"),
-    ];
-
-    f.render_widget(Paragraph::new(lines), inner);
+    let mut left = vec![Line::from("")];
+    left.extend(help_lines(HELP_LEFT));
+    let mut right = vec![Line::from("")];
+    right.extend(help_lines(HELP_RIGHT));
+    if two_columns {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+            .split(inner);
+        f.render_widget(Paragraph::new(left), cols[0]);
+        f.render_widget(Paragraph::new(right), cols[1]);
+    } else {
+        left.extend(right.into_iter().skip(1));
+        f.render_widget(Paragraph::new(left), inner);
+    }
 }

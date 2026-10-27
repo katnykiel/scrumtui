@@ -1,107 +1,73 @@
-use chrono::Local;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
 use crate::app::App;
-use crate::models::{format_duration, format_sp, Issue, Status};
+use crate::models::{format_sp, Issue, Status};
 use crate::ui::backlog::{status_color, status_symbol, trunc};
+use crate::ui::{detail_height, due_color, hint, render_issue_detail, word_wrap, BORDER, BORDER_DIM, FROG};
 
 const STATUSES: [Status; 3] = [Status::Todo, Status::InProgress, Status::Done];
-
-/// Split `text` into lines that fit within `width` characters, breaking on word boundaries.
-fn word_wrap(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![text.to_string()];
-    }
-    let mut lines: Vec<String> = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        if current.is_empty() {
-            current.push_str(word);
-        } else if current.len() + 1 + word.len() <= width {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            lines.push(current.clone());
-            current = word.to_string();
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
-}
-
-fn due_color(due: &chrono::NaiveDate, done: bool) -> Color {
-    if done { return Color::DarkGray; }
-    let today = Local::now().date_naive();
-    let days = (*due - today).num_days();
-    if days < 0 { Color::Red } else if days < 7 { Color::Yellow } else { Color::DarkGray }
-}
 
 pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let has_subs = app.sprint_has_any_subtasks();
 
-    let hint = if has_subs {
-        if app.kanban_panel == 1 {
-            " [e] edit  [^H/^L] move  [Tab] parent  [</>] cycle  [u] undo  [?] help "
-        } else {
-            " [n] new  [e] edit  [h/l] col  [^H/^L] move  [Tab] subs  [u] undo  [?] help "
-        }
+    let hint_text = if app.kanban_panel == 1 {
+        "[n] add subtask  [e] edit  [^H/^L] move  [h/l] parent  [Tab] cards  [u] undo  [?] help"
+    } else if has_subs {
+        "[n] new  [e] edit  [h/l] column  [^H/^L] move  [Tab] subtasks  [u] undo  [?] help"
     } else {
-        " [n] new  [e] edit  [h/l] col  [^H/^L] move issue  [/] search  [u] undo  [?] help "
+        "[n] new  [e] edit  [h/l] column  [^H/^L] move  [f] frog  [u] undo  [?] help"
     };
 
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled("kanban", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-        ]))
-        .title_bottom(Line::from(Span::styled(
-            hint,
-            Style::default().fg(Color::DarkGray),
-        )))
-        .border_style(Style::default().fg(Color::Rgb(100, 100, 160)));
-
+        .title_bottom(hint(hint_text))
+        .border_style(Style::default().fg(BORDER));
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
+    if app.active_sprint.is_none() {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  No active sprint. Press S to start one, then s on backlog issues (1) to pull them in.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            inner,
+        );
+        return;
+    }
+
+    let selected = app.kanban_selected_issue();
+    let detail_h = detail_height(app, selected.as_ref(), inner.width, (inner.height / 3).max(5));
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(6), Constraint::Length(4)])
+        .constraints([Constraint::Min(6), Constraint::Length(detail_h)])
         .split(inner);
 
     let board_area = v_chunks[0];
-    let detail_area = v_chunks[1];
-
     if has_subs {
         let sub_count = app.sprint_subtasks_flat().len();
         let sub_h = ((sub_count + 2) as u16).max(4).min(board_area.height / 2);
-        let parent_h = board_area.height.saturating_sub(sub_h);
-
         let panels = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(parent_h), Constraint::Length(sub_h)])
+            .constraints([Constraint::Min(4), Constraint::Length(sub_h)])
             .split(board_area);
-
         render_board(f, app, panels[0]);
         render_subtask_panel(f, app, panels[1]);
     } else {
         render_board(f, app, board_area);
     }
 
-    render_detail(f, app, detail_area);
+    render_issue_detail(f, app, selected.as_ref(), v_chunks[1]);
 }
 
 fn render_board(f: &mut Frame, app: &mut App, area: Rect) {
@@ -122,85 +88,57 @@ fn render_subtask_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let parents = app.sprint_parents_with_subtasks();
     let n = parents.len();
     let idx = app.kanban_sub_parent_idx.min(n.saturating_sub(1));
-    let parent_name = parents.get(idx)
-        .map(|p| p.title.clone())
-        .unwrap_or_default();
+    let parent_name = parents.get(idx).map(|p| p.title.clone()).unwrap_or_default();
 
-    let border_color = if is_focused { Color::Magenta } else { Color::Rgb(90, 90, 140) };
+    let border_color = if is_focused { Color::Magenta } else { BORDER_DIM };
     let title_style = if is_focused {
         Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-
     let parent_label = if n > 1 {
-        format!(" subtasks — {} ({}/{}) ", parent_name, idx + 1, n)
+        format!(" subtasks: {} ({}/{}) ", parent_name, idx + 1, n)
     } else {
-        format!(" subtasks — {} ", parent_name)
+        format!(" subtasks: {} ", parent_name)
     };
-    let cycle_hint = if n > 1 { " [</>] cycle parent " } else { "" };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
-        .title(Line::from(Span::styled(parent_label, title_style)))
-        .title_bottom(Line::from(Span::styled(
-            cycle_hint,
-            Style::default().fg(Color::DarkGray),
-        )));
-
+        .title(Line::from(Span::styled(parent_label, title_style)));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let subtasks = app.sprint_subtasks_flat();
-    let sel_row = app.kanban_sub_rows[0];
+    let sel_row = app.kanban_sub_row;
     let col_w = inner.width as usize;
 
-    let items: Vec<ListItem> = subtasks.iter().enumerate().map(|(flat_row, issue)| {
-        let is_sel = is_focused && flat_row == sel_row;
-        let pointer = if is_sel { "▶" } else { " " };
+    let items: Vec<ListItem> = subtasks.iter().enumerate().map(|(row, issue)| {
+        let is_sel = is_focused && row == sel_row;
         let is_done = issue.status == Status::Done;
         let sc = status_color(&issue.status);
-        let sym = status_symbol(&issue.status);
         let status_badge = format!("[{}]", issue.status.short().trim());
-
-        // Subtasks: terminal default fg for active (no bold — subtler than parents), DarkGray for done.
-        let title_style = if is_done {
-            Style::default().fg(Color::Gray)
-        } else {
-            Style::default()
+        let title_style = match (is_sel, is_done) {
+            (true, _) => Style::default().add_modifier(Modifier::REVERSED),
+            (false, true) => Style::default().fg(Color::Gray),
+            (false, false) => Style::default(),
         };
-
-        let due_str = issue.due_date
-            .map(|d| format!(" {}", d.format("%b %d")))
-            .unwrap_or_default();
-        let badge_w = status_badge.len() + 1 + due_str.len();
-        let title_max = col_w.saturating_sub(4 + badge_w);
-
+        let title_max = col_w.saturating_sub(5 + status_badge.len());
         ListItem::new(Line::from(vec![
-            Span::styled(format!("{pointer} "), Style::default().fg(Color::Magenta)),
-            Span::styled(format!("{sym} "), Style::default().fg(sc)),
-            Span::styled(
-                format!("{:<width$}", trunc(&issue.title, title_max), width = title_max),
-                title_style,
-            ),
+            Span::styled(if is_sel { "▶ " } else { "  " }, Style::default().fg(Color::Magenta)),
+            Span::styled(format!("{} ", status_symbol(&issue.status)), Style::default().fg(sc)),
+            Span::styled(format!("{:<title_max$}", trunc(&issue.title, title_max)), title_style),
             Span::raw(" "),
             Span::styled(status_badge, Style::default().fg(sc)),
-            Span::styled(due_str, Style::default().fg(
-                issue.due_date.map(|d| due_color(&d, is_done)).unwrap_or(Color::DarkGray)
-            )),
         ]))
     }).collect();
 
-    let mut list_state = ratatui::widgets::ListState::default();
+    let mut state = ListState::default();
     if is_focused && !subtasks.is_empty() {
-        list_state.select(Some(sel_row.min(subtasks.len().saturating_sub(1))));
+        state.select(Some(sel_row.min(subtasks.len() - 1)));
     }
-
-    let list = List::new(items)
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
-    f.render_stateful_widget(list, inner, &mut list_state);
+    f.render_stateful_widget(List::new(items), inner, &mut state);
 }
 
 fn render_column(
@@ -215,7 +153,7 @@ fn render_column(
     let sc = status_color(status);
     let issues: Vec<Issue> = app.sprint_parents_by_status(status);
     let selected_row = app.kanban_rows[col_idx];
-    let border_color = if is_active_col { sc } else { Color::Rgb(90, 90, 140) };
+    let border_color = if is_active_col { sc } else { BORDER_DIM };
 
     let col_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -223,16 +161,14 @@ fn render_column(
         .split(area);
 
     // ── Header ──────────────────────────────────────────────────────────────
-    let sym = status_symbol(status);
     let total_sp: f64 = issues.iter().map(|i| i.story_points).sum();
-    let sp_str = if total_sp > 0.0 { format!("  {}sp", format_sp(total_sp)) } else { String::new() };
-    let header_text = format!("  {sym} {}  {}  {}{}", status.label(), "·", issues.len(), sp_str);
+    let sp_str = if total_sp > 0.0 { format!(" · {}sp", format_sp(total_sp)) } else { String::new() };
+    let header_text = format!(" {} {} · {}{}", status_symbol(status), status.label(), issues.len(), sp_str);
     let header_style = if is_active_col {
         Style::default().fg(sc).add_modifier(Modifier::BOLD | Modifier::REVERSED)
     } else {
         Style::default().fg(sc).add_modifier(Modifier::BOLD)
     };
-
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(header_text, header_style)))
             .block(Block::default()
@@ -242,161 +178,74 @@ fn render_column(
         col_chunks[0],
     );
 
-    // ── Issue list ───────────────────────────────────────────────────────────
-    let col_w = area.width as usize;
+    // ── Cards ────────────────────────────────────────────────────────────────
+    // Text width inside the borders, minus the pointer column.
+    let title_w = (area.width as usize).saturating_sub(5).max(4);
     let items: Vec<ListItem> = issues
         .iter()
         .enumerate()
         .map(|(row, issue)| {
             let is_sel = is_active_col && row == selected_row;
-            let pointer = if is_sel { "▶" } else { " " };
-            // available width for title text: col_w minus 2 borders minus pointer minus space
-            let title_w = col_w.saturating_sub(4).max(4);
             let is_done = issue.status == Status::Done;
-            let (done_subs, total_subs) = app.subtask_counts(issue.id);
-            let sub_badge = if total_subs > 0 { format!("  [{}/{}]", done_subs, total_subs) } else { String::new() };
-            let due_str = issue.due_date.map(|d| format!("  {}", d.format("%b %d"))).unwrap_or_default();
-            let carry_badge = if issue.carry_count > 0 {
-                format!("  ↩{}", issue.carry_count)
-            } else {
-                String::new()
+            // Cards are bold; done cards are faded. The selected card's title is reversed.
+            let title_style = match (is_sel, is_done) {
+                (true, _) => Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                (false, true) => Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+                (false, false) => Style::default().add_modifier(Modifier::BOLD),
             };
-            // All kanban cards are bold; done cards are faded (DarkGray) but still bold.
-            let title_style = if is_done {
-                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().add_modifier(Modifier::BOLD)
-            };
-
-            // Word-wrap the title across multiple lines.
-            let title_lines = word_wrap(&issue.title, title_w);
-            let mut lines: Vec<Line> = title_lines
+            let mut lines: Vec<Line> = word_wrap(&issue.title, title_w)
                 .into_iter()
                 .enumerate()
                 .map(|(i, chunk)| {
-                    if i == 0 {
-                        Line::from(vec![
-                            Span::styled(pointer, Style::default().fg(Color::Magenta)),
-                            Span::styled(format!(" {}", chunk), title_style),
-                        ])
-                    } else {
-                        Line::from(vec![
-                            Span::raw("  "),
-                            Span::styled(chunk, title_style),
-                        ])
-                    }
+                    let lead = if i == 0 && is_sel { "▶ " } else { "  " };
+                    Line::from(vec![
+                        Span::styled(lead, Style::default().fg(Color::Magenta)),
+                        Span::styled(chunk, title_style),
+                    ])
                 })
                 .collect();
 
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("   {}sp  {}{}", format_sp(issue.story_points), trunc(&issue.epic, 14), sub_badge),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(carry_badge, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::styled(due_str, Style::default().fg(
-                    issue.due_date.map(|d| due_color(&d, is_done)).unwrap_or(Color::DarkGray)
-                )),
-            ]));
-
+            // Most important first: a narrow column cuts the end of this line.
+            let dim = Style::default().fg(Color::DarkGray);
+            let mut meta = vec![Span::styled(format!("  {}sp", format_sp(issue.story_points)), dim)];
+            if app.frog_id == Some(issue.id) {
+                meta.push(Span::styled(" frog", Style::default().fg(FROG).add_modifier(Modifier::BOLD)));
+            }
+            if issue.carry_count > 0 {
+                meta.push(Span::styled(
+                    format!(" ↩{}", issue.carry_count),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ));
+            }
+            if let Some(d) = issue.due_date {
+                meta.push(Span::styled(
+                    format!(" · {}", d.format("%b %d")),
+                    Style::default().fg(due_color(d, is_done)),
+                ));
+            }
+            let (done_subs, total_subs) = app.subtask_counts(issue.id);
+            if total_subs > 0 {
+                meta.push(Span::styled(format!(" · {done_subs}/{total_subs}"), dim));
+            }
+            meta.push(Span::styled(format!(" · {}", trunc(&issue.epic, 14)), dim));
+            lines.push(Line::from(meta));
             ListItem::new(lines)
         })
         .collect();
 
-    let mut list_state = ratatui::widgets::ListState::default();
-    if is_active_col && !issues.is_empty() {
-        list_state.select(Some(selected_row.min(issues.len().saturating_sub(1))));
-    }
-
-    let list = List::new(items)
-        .block(Block::default()
-            .borders(Borders::LEFT | Borders::BOTTOM | Borders::RIGHT)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(border_color)))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
-
-    f.render_stateful_widget(list, col_chunks[1], &mut list_state);
-}
-
-fn render_detail(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::LEFT | Borders::BOTTOM | Borders::RIGHT)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Rgb(90, 90, 140)))
-        .title(Span::styled(" detail ", Style::default().fg(Color::DarkGray)));
-
-    let Some(issue) = app.kanban_selected_issue() else {
+        .border_style(Style::default().fg(border_color));
+    if items.is_empty() {
         f.render_widget(
-            Paragraph::new("  No issue selected.")
-                .style(Style::default().fg(Color::DarkGray))
-                .block(block),
-            area,
+            Paragraph::new(Span::styled("  (empty)", Style::default().fg(Color::DarkGray))).block(block),
+            col_chunks[1],
         );
         return;
-    };
-
-    let sc = status_color(&issue.status);
-    let sym = status_symbol(&issue.status);
-    let desc = issue.description.as_deref().unwrap_or("");
-    let due_str = issue.due_date
-        .map(|d| d.format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|| "—".into());
-    let created = issue.created_at.format("%Y-%m-%d %H:%M").to_string();
-    let updated = issue.updated_at.format("%Y-%m-%d %H:%M").to_string();
-    let completed = issue.completed_at
-        .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "—".into());
-
-    let carry_str = if issue.carry_count > 0 {
-        format!("  ↩{} carried", issue.carry_count)
-    } else {
-        String::new()
-    };
-
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(format!("  {sym} "), Style::default().fg(sc)),
-            Span::styled(
-                issue.title.clone(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("   #{} · {}sp · {} · {}", issue.id, format_sp(issue.story_points), issue.status.label(), issue.epic),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(carry_str, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]),
-    ];
-    if !desc.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("         ", Style::default()),
-            Span::styled(desc, Style::default().fg(Color::DarkGray)),
-        ]));
     }
-    let time_str = if let Some(start) = issue.started_at {
-        let end = issue.completed_at.unwrap_or_else(|| Local::now().naive_local());
-        let label = if issue.status == Status::Done { "actual" } else { "ongoing" };
-        format!("{}  {}", format_duration(start, end), label)
-    } else {
-        String::new()
-    };
-
-    lines.push(Line::from(vec![
-        Span::styled("  due ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{:<12}", due_str), Style::default().fg(Color::Yellow)),
-        Span::styled("  created ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{:<17}", created), Style::default().fg(Color::DarkGray)),
-        Span::styled("  updated ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{:<17}", updated), Style::default().fg(Color::DarkGray)),
-        Span::styled("  done ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{:<17}", completed), Style::default().fg(Color::DarkGray)),
-    ]));
-    if !time_str.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("  time ", Style::default().fg(Color::DarkGray)),
-            Span::styled(time_str, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-        ]));
-    }
-
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
+    let mut state = ListState::default().with_offset(app.kanban_offsets[col_idx]);
+    state.select(Some(selected_row.min(issues.len() - 1)));
+    f.render_stateful_widget(List::new(items).block(block), col_chunks[1], &mut state);
+    app.kanban_offsets[col_idx] = state.offset();
 }

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::io::Write;
 
 use crate::db::Db;
-use crate::models::{format_sp, Status};
+use crate::models::{format_sp, Issue, Status};
 
 pub fn export_markdown(db: &Db, path: &str) -> Result<()> {
     let issues = db.get_all_issues()?;
@@ -22,8 +22,37 @@ pub fn export_markdown(db: &Db, path: &str) -> Result<()> {
             .unwrap_or_else(|| "—".into())
     };
 
+    // A `|` inside a cell would end it early.
+    let cell = |s: &str| s.replace('|', "\\|");
+
     let header = "| Status | Title | SP | Epic | Due |\n\
                   |--------|-------|----|------|-----|\n";
+
+    // One issue row followed by its subtasks (in creation order).
+    let write_issue = |out: &mut std::fs::File, issue: &Issue| -> Result<()> {
+        writeln!(
+            out,
+            "| {} {} | {} | {} | {} | {} |",
+            sym(&issue.status),
+            issue.status.label(),
+            cell(&issue.title),
+            format_sp(issue.story_points),
+            cell(&issue.epic),
+            due_str(&issue.due_date),
+        )?;
+        // DB order is newest first; reverse for creation order.
+        for child in issues.iter().rev().filter(|i| i.parent_id == Some(issue.id)) {
+            writeln!(
+                out,
+                "| {} {} | ↳ {} |  |  | {} |",
+                sym(&child.status),
+                child.status.label(),
+                cell(&child.title),
+                due_str(&child.due_date),
+            )?;
+        }
+        Ok(())
+    };
 
     // ── Sprint section ─────────────────────────────────────────────────────────
     if let Some(ref s) = sprint {
@@ -43,30 +72,7 @@ pub fn export_markdown(db: &Db, path: &str) -> Result<()> {
         if !sprint_issues.is_empty() {
             write!(out, "{}", header)?;
             for issue in &sprint_issues {
-                writeln!(
-                    out,
-                    "| {} {} | {} | {} | {} | {} |",
-                    sym(&issue.status),
-                    issue.status.label(),
-                    issue.title,
-                    format_sp(issue.story_points),
-                    issue.epic,
-                    due_str(&issue.due_date),
-                )?;
-                // Children
-                let children: Vec<_> = issues.iter().filter(|i| i.parent_id == Some(issue.id)).collect();
-                for child in children {
-                    writeln!(
-                        out,
-                        "| {} {} | ↳ {} | {} | {} | {} |",
-                        sym(&child.status),
-                        child.status.label(),
-                        child.title,
-                        format_sp(child.story_points),
-                        child.epic,
-                        due_str(&child.due_date),
-                    )?;
-                }
+                write_issue(&mut out, issue)?;
             }
             writeln!(out)?;
 
@@ -100,29 +106,7 @@ pub fn export_markdown(db: &Db, path: &str) -> Result<()> {
         writeln!(out, "# Backlog\n")?;
         write!(out, "{}", header)?;
         for issue in &backlog {
-            writeln!(
-                out,
-                "| {} {} | {} | {} | {} | {} |",
-                sym(&issue.status),
-                issue.status.label(),
-                issue.title,
-                format_sp(issue.story_points),
-                issue.epic,
-                due_str(&issue.due_date),
-            )?;
-            let children: Vec<_> = issues.iter().filter(|i| i.parent_id == Some(issue.id)).collect();
-            for child in children {
-                writeln!(
-                    out,
-                    "| {} {} | ↳ {} | {} | {} | {} |",
-                    sym(&child.status),
-                    child.status.label(),
-                    child.title,
-                    format_sp(child.story_points),
-                    child.epic,
-                    due_str(&child.due_date),
-                )?;
-            }
+            write_issue(&mut out, issue)?;
         }
     }
 

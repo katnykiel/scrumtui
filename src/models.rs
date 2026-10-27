@@ -148,6 +148,59 @@ pub struct Sprint {
     pub start_date: NaiveDate,
     pub end_date: NaiveDate,
     pub is_active: bool,
-    #[allow(dead_code)]
     pub created_at: NaiveDateTime,
+}
+
+impl Sprint {
+    /// Length in days, counting both ends. Sprints recorded with start == end (an
+    /// artifact of never setting an end date) count as a Monday–Friday week.
+    pub fn duration_days(&self) -> i64 {
+        let raw = (self.end_date - self.start_date).num_days() + 1;
+        if raw <= 1 { 5 } else { raw }
+    }
+
+    /// Issues that join on or before this day count as planned scope; later ones are
+    /// scope creep. It's the start date, or the day the sprint was set up if that was
+    /// later (planning often happens a day into the week).
+    pub fn planning_day(&self) -> NaiveDate {
+        self.start_date.max(self.created_at.date())
+    }
+}
+
+/// What became of an issue in one sprint it was part of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Finished while this was its sprint.
+    Done,
+    /// Still assigned to this sprint and not finished.
+    Open,
+    /// Moved on to a later sprint unfinished (carry-forward).
+    Carried,
+    /// Taken out of the sprint by hand while it was running.
+    Removed,
+}
+
+/// One issue's membership in one sprint, as recorded in `issue_sprint_log`.
+#[derive(Debug, Clone)]
+pub struct SprintEntry {
+    pub issue: Issue,
+    /// When the issue joined the sprint (None for rows logged before 2.3).
+    pub added_at: Option<NaiveDateTime>,
+    pub removed_at: Option<NaiveDateTime>,
+    pub outcome: Outcome,
+}
+
+impl SprintEntry {
+    /// When the issue joined the sprint, falling back to its creation time for old rows
+    /// (or rows logged long after the sprint, e.g. by a Jira import).
+    pub fn joined_at(&self, sprint: &Sprint) -> NaiveDateTime {
+        self.added_at
+            .filter(|a| a.date() <= sprint.end_date)
+            .unwrap_or(self.issue.created_at)
+    }
+
+    /// Whether the issue joined after planning, i.e. counts as scope creep.
+    pub fn added_mid_sprint(&self, sprint: &Sprint) -> bool {
+        self.joined_at(sprint).date() > sprint.planning_day()
+    }
 }
