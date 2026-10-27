@@ -1,6 +1,6 @@
 [package]
 name = "scrumtui"
-version = "2.4.0"
+version = "2.4.1"
 edition = "2021"
 
 [[bin]]
@@ -15,3 +15,7 @@ chrono = "0.4"
 anyhow = "1"
 csv = "1"
 signal-hook = "0.4.4"
+
+# Clipboard for `y` when no clipboard tool (wl-copy, xclip, xsel) is installed
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3", default-features = false }

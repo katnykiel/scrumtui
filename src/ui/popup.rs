@@ -145,7 +145,7 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
         let label_style = if is_focused {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(Color::Gray)
         };
         let underline = Block::default()
             .borders(Borders::BOTTOM)
@@ -164,7 +164,7 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
             for text_line in desc_src.split('\n') {
                 desc_lines.push(Line::from(Span::styled(
                     format!(" {text_line}"),
-                    if is_focused { Style::default() } else { Style::default().fg(Color::DarkGray) },
+                    Style::default().fg(if is_focused { Color::White } else { Color::Gray }),
                 )));
             }
             f.render_widget(
@@ -197,7 +197,7 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
             Line::from(spans)
         } else {
             let cursor = if is_focused { "▌" } else { "" };
-            let style = if is_focused { Style::default() } else { Style::default().fg(Color::Gray) };
+            let style = Style::default().fg(if is_focused { Color::White } else { Color::Gray });
             Line::from(vec![
                 Span::styled(format!(" {}", values[i]), style),
                 Span::styled(cursor, Style::default().fg(Color::Cyan)),
@@ -233,7 +233,7 @@ fn render_subtask_list(f: &mut Frame, form: &IssueForm, area: Rect) {
     let label_style = if is_focused {
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Gray)
     };
 
     let visible: Vec<_> = form.subtasks.iter().filter(|s| !s.deleted).collect();
@@ -276,9 +276,9 @@ fn render_subtask_list(f: &mut Frame, form: &IssueForm, area: Rect) {
             let row_style = if is_sel && !form.subtask_editing {
                 Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
             } else if is_sel {
-                Style::default().add_modifier(Modifier::BOLD)
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
+                Style::default().fg(Color::White)
             };
             ListItem::new(Line::from(vec![
                 Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(Color::Magenta)),

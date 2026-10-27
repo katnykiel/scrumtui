@@ -2623,6 +2623,7 @@ impl App {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Pipe `text` into the first available clipboard tool (macOS, Wayland, then X11).
+/// On Linux without any of them, a background `scrumtui __clipboard` holds it.
 fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -2653,7 +2654,60 @@ fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
             Err(e) => last_err = e,
         }
     }
+    #[cfg(target_os = "linux")]
+    if last_err.kind() == std::io::ErrorKind::NotFound {
+        return hold_clipboard(text);
+    }
     Err(last_err)
+}
+
+/// Copy `text` without a clipboard tool: start a detached `scrumtui __clipboard`
+/// that owns the clipboard and answers pastes until something else is copied,
+/// the way xclip does. It replies "ok" once it has the clipboard, or the error.
+#[cfg(target_os = "linux")]
+fn hold_clipboard(text: &str) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(std::env::current_exe()?)
+        .arg("__clipboard")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0) // own group: Ctrl-C in the terminal doesn't reach it
+        .spawn()?;
+    // If the helper died early, the write fails and the reply says why.
+    let _ = child.stdin.take().unwrap().write_all(text.as_bytes());
+    let mut reply = String::new();
+    let _ = BufReader::new(child.stdout.take().unwrap()).read_line(&mut reply);
+    // Reap the helper when it exits, so it doesn't linger as a zombie.
+    std::thread::spawn(move || child.wait());
+    match reply.trim() {
+        "ok" => Ok(()),
+        "" => Err(std::io::Error::other("clipboard helper exited")),
+        err => Err(std::io::Error::other(err.to_string())),
+    }
+}
+
+/// `scrumtui __clipboard`: put stdin on the clipboard and keep serving it until
+/// another program copies something. See `hold_clipboard`.
+#[cfg(target_os = "linux")]
+pub fn serve_clipboard() -> Result<()> {
+    use arboard::SetExtLinux;
+    use std::io::{Read, Write};
+    let mut text = String::new();
+    std::io::stdin().read_to_string(&mut text)?;
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("{e}");
+            return Err(e.into());
+        }
+    };
+    println!("ok");
+    std::io::stdout().flush()?;
+    clipboard.set().wait().text(text)?;
+    Ok(())
 }
 
 /// Translate arrow keys into their vim equivalents (←↓↑→ → h/j/k/l), keeping

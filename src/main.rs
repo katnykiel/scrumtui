@@ -162,6 +162,10 @@ fn main() -> Result<()> {
             res
         }
 
+        // ── internal: holds the clipboard for `y` when no clipboard tool is installed
+        #[cfg(target_os = "linux")]
+        Some("__clipboard") => app::serve_clipboard(),
+
         Some("--version") | Some("-V") | Some("-v") => {
             println!("scrumtui {}", env!("CARGO_PKG_VERSION"));
             Ok(())

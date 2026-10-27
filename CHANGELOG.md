@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.4.1] - 2026-10-27
+
+### Fixed
+- **`y` copies on Linux without a clipboard tool.** When none of `wl-copy`, `xclip` or `xsel` is installed, a background `scrumtui __clipboard` process holds the copied text and serves pastes until something else is copied, as `xclip` does. Before, `y` failed with "no clipboard tool found".
+- README screenshots restored.
+
+### Changed
+- Brighter text in the issue form: the field you're typing in and subtask titles are white, and labels and the other fields are light gray instead of dark gray.
+
+---
+
 ## [2.4.0] - 2026-10-21
 
 ### Changed
