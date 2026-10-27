@@ -39,8 +39,8 @@ pub fn render(f: &mut Frame, popup: &Popup, app: &App) {
             render_confirm(f, "Delete sprint", name, Some("Its issues stay; they're just unlinked."))
         }
         Popup::Trash { items, sel } => render_trash(f, items, *sel),
-        Popup::Help => render_help(f),
-        Popup::GanttEpicDetail { .. } => {} // handled separately in mod.rs
+        // handled separately in mod.rs
+        Popup::Help | Popup::GanttEpicDetail { .. } => {}
     }
 }
 
@@ -92,22 +92,31 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
     // header + each subtask row, minimum 3 rows so the section is always visible
     let subtask_section_height: u16 = (2 + visible_subtasks).max(3) as u16;
     // Description field gets more rows when focused so text wraps visibly
-    let desc_height: u16 = if form.focused_field == F_DESC && !form.in_subtask_list { 5 } else { 3 };
-    let base_height: u16 = 19 + desc_height;
-    let total_height = (base_height + subtask_section_height).min(f.area().height.saturating_sub(2));
+    let desc_extra: u16 = if form.focused_field == F_DESC && !form.in_subtask_list { 2 } else { 0 };
+    // Six fields of `field_h` rows, 2 for the error and 2 for the border.
+    let fields_height = |field_h: u16| 6 * field_h + 4;
+    let max_height = f.area().height.saturating_sub(2);
+    // A field is a label, its value and an underline. When the screen is too short
+    // for that plus 3 subtask rows, drop the underlines rather than let the layout
+    // squeeze out values. The subtask list takes what is left and scrolls.
+    let compact = fields_height(3) + 3 > max_height;
+    let field_h: u16 = if compact { 2 } else { 3 };
+    let desc_height = field_h + desc_extra;
+    let total_height = (fields_height(field_h) + desc_extra + subtask_section_height).min(max_height);
     let area = centered_rect(76, total_height, f.area());
     f.render_widget(Clear, area);
 
+    // At most 72 characters, or the bottom border of the 76-wide popup cuts them.
     let bottom_hint = if form.in_subtask_list && form.subtask_editing {
         "[Enter] done  [Tab] next subtask  [Esc] done"
     } else if form.in_subtask_list {
-        "[j/k] move  [e] rename  [h/l] status  [n] add  [x] remove  [Enter] save  [Esc] back"
+        "[e] rename  [h/l] status  [n/x] add/remove  [Enter] save  [Esc] back"
     } else if form.epic_dropdown_open || form.due_date_dropdown_open {
         "[↑/↓] choose  [Enter/Tab] pick  [Esc] close list"
     } else if form.focused_field == F_STATUS {
-        "[h/l] status  [Tab] next  [Ctrl-N] subtask  [Enter] save  [Esc] cancel"
+        "[h/l] status  [Tab] next  [^N] subtask  [Enter] save  [Esc] cancel"
     } else {
-        "[Tab/↓] next  [S-Tab/↑] prev  [Ctrl-N] subtask  [Enter] save  [Esc] cancel"
+        "[Tab/↓] next  [S-Tab/↑] prev  [^N] subtask  [Enter] save  [Esc] cancel"
     };
 
     let block = popup_block(title, Color::Cyan)
@@ -119,14 +128,14 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
     let field_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // title
-            Constraint::Length(3), // epic
-            Constraint::Length(3), // story points
-            Constraint::Length(3), // status
-            Constraint::Length(3), // due
+            Constraint::Length(field_h), // title
+            Constraint::Length(field_h), // epic
+            Constraint::Length(field_h), // story points
+            Constraint::Length(field_h), // status
+            Constraint::Length(field_h), // due
             Constraint::Length(desc_height), // desc (taller when focused)
             Constraint::Length(2), // error
-            Constraint::Min(subtask_section_height), // subtasks
+            Constraint::Min(0), // subtasks (the rest)
         ])
         .split(inner);
 
@@ -144,11 +153,14 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
         let is_focused = form.focused_field == i && !form.in_subtask_list;
         let label_style = if is_focused {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else if compact {
+            // No underlines between the fields, so set the labels apart.
+            Style::default().add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default()
         };
         let underline = Block::default()
-            .borders(Borders::BOTTOM)
+            .borders(if compact { Borders::NONE } else { Borders::BOTTOM })
             .border_style(Style::default().fg(if is_focused { Color::Cyan } else { Color::DarkGray }));
 
         if i == F_DESC {
@@ -162,10 +174,7 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
                 form.description.replace('\n', "  ·  ")
             };
             for text_line in desc_src.split('\n') {
-                desc_lines.push(Line::from(Span::styled(
-                    format!(" {text_line}"),
-                    Style::default().fg(if is_focused { Color::White } else { Color::Gray }),
-                )));
+                desc_lines.push(Line::from(Span::styled(format!(" {text_line}"), Style::default())));
             }
             f.render_widget(
                 Paragraph::new(desc_lines).wrap(Wrap { trim: false }).block(underline),
@@ -197,9 +206,8 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
             Line::from(spans)
         } else {
             let cursor = if is_focused { "▌" } else { "" };
-            let style = Style::default().fg(if is_focused { Color::White } else { Color::Gray });
             Line::from(vec![
-                Span::styled(format!(" {}", values[i]), style),
+                Span::raw(format!(" {}", values[i])),
                 Span::styled(cursor, Style::default().fg(Color::Cyan)),
             ])
         };
@@ -220,20 +228,21 @@ fn render_issue_form(f: &mut Frame, form: &IssueForm, title: &str, app: &App) {
     render_subtask_list(f, form, field_areas[7]);
 
     if form.epic_dropdown_open {
-        render_epic_dropdown(f, form, app, field_areas[F_EPIC]);
+        render_epic_dropdown(f, form, app, field_areas[F_EPIC], inner);
     }
     if form.due_date_dropdown_open {
-        render_due_date_dropdown(f, form, app, field_areas[F_DUE]);
+        render_due_date_dropdown(f, form, app, field_areas[F_DUE], inner);
     }
 }
 
 fn render_subtask_list(f: &mut Frame, form: &IssueForm, area: Rect) {
     let is_focused = form.in_subtask_list;
     let border_color = if is_focused { Color::Cyan } else { Color::Rgb(60, 60, 90) };
+    // Reset, not unset: a title span without a color takes the border's.
     let label_style = if is_focused {
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(Color::Reset)
     };
 
     let visible: Vec<_> = form.subtasks.iter().filter(|s| !s.deleted).collect();
@@ -276,9 +285,9 @@ fn render_subtask_list(f: &mut Frame, form: &IssueForm, area: Rect) {
             let row_style = if is_sel && !form.subtask_editing {
                 Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
             } else if is_sel {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                Style::default().add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default()
             };
             ListItem::new(Line::from(vec![
                 Span::styled(if is_sel { " ▶ " } else { "   " }, Style::default().fg(Color::Magenta)),
@@ -295,8 +304,16 @@ fn render_subtask_list(f: &mut Frame, form: &IssueForm, area: Rect) {
     f.render_stateful_widget(List::new(items), inner, &mut state);
 }
 
-/// A dropdown list under a form field: (label, hint) rows, `sel` highlighted.
-fn render_dropdown(f: &mut Frame, field_area: Rect, title: &str, rows: &[(String, String)], sel: usize) {
+/// A dropdown list under a form field (inside the form's `bounds`): (label, hint)
+/// rows, `sel` highlighted.
+fn render_dropdown(
+    f: &mut Frame,
+    field_area: Rect,
+    bounds: Rect,
+    title: &str,
+    rows: &[(String, String)],
+    sel: usize,
+) {
     let rows = &rows[..rows.len().min(DROPDOWN_ROWS)];
     if rows.is_empty() {
         return;
@@ -308,13 +325,17 @@ fn render_dropdown(f: &mut Frame, field_area: Rect, title: &str, rows: &[(String
         .unwrap_or(10)
         .saturating_add(4)
         .max(22)
-        .min(field_area.width as usize) as u16;
-    let drop_area = Rect {
-        x: field_area.x + 2,
-        y: field_area.y + field_area.height,
-        width,
-        height: rows.len() as u16 + 2,
+        .min(field_area.width.saturating_sub(2) as usize) as u16;
+    let height = rows.len() as u16 + 2;
+    // Below the field, or above it when only that fits inside the form; never off
+    // screen (drawing outside the buffer panics).
+    let below = field_area.y + field_area.height;
+    let y = if below + height > bounds.bottom() && field_area.y >= bounds.y + height {
+        field_area.y - height
+    } else {
+        below
     };
+    let drop_area = Rect { x: field_area.x + 2, y, width, height }.intersection(f.area());
     f.render_widget(Clear, drop_area);
 
     let sel = sel.min(rows.len() - 1);
@@ -344,24 +365,25 @@ fn render_dropdown(f: &mut Frame, field_area: Rect, title: &str, rows: &[(String
     f.render_widget(list, drop_area);
 }
 
-fn render_epic_dropdown(f: &mut Frame, form: &IssueForm, app: &App, field_area: Rect) {
+fn render_epic_dropdown(f: &mut Frame, form: &IssueForm, app: &App, field_area: Rect, bounds: Rect) {
     let rows: Vec<(String, String)> = app
         .epic_matches(&form.epic)
         .into_iter()
         .map(|e| (e, String::new()))
         .collect();
-    render_dropdown(f, field_area, "epics", &rows, form.epic_dropdown_sel);
+    render_dropdown(f, field_area, bounds, "epics", &rows, form.epic_dropdown_sel);
 }
 
-fn render_due_date_dropdown(f: &mut Frame, form: &IssueForm, app: &App, field_area: Rect) {
+fn render_due_date_dropdown(f: &mut Frame, form: &IssueForm, app: &App, field_area: Rect, bounds: Rect) {
     let rows = app.due_matches(&form.due_date);
-    render_dropdown(f, field_area, "due date", &rows, form.due_date_dropdown_sel);
+    render_dropdown(f, field_area, bounds, "due date", &rows, form.due_date_dropdown_sel);
 }
 
 // ── Trash popup ──────────────────────────────────────────────────────────────────
 
 fn render_trash(f: &mut Frame, items: &[Issue], sel: usize) {
-    let height = (items.len() as u16 + 4).clamp(8, f.area().height.saturating_sub(4));
+    // max then min, not clamp: clamp panics when the screen is shorter than 12 rows.
+    let height = (items.len() as u16 + 4).max(8).min(f.area().height.saturating_sub(4));
     let area = centered_rect(70, height, f.area());
     f.render_widget(Clear, area);
 
@@ -446,7 +468,7 @@ fn render_sprint_form(f: &mut Frame, form: &SprintForm, app: &App) {
         let label_style = if is_focused {
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default()
         };
         let value_line = if i == 3 {
             let mut spans = vec![if form.is_active {
@@ -459,9 +481,8 @@ fn render_sprint_form(f: &mut Frame, form: &SprintForm, app: &App) {
             }
             Line::from(spans)
         } else {
-            let style = if is_focused { Style::default() } else { Style::default().fg(Color::Gray) };
             Line::from(vec![
-                Span::styled(format!(" {value}"), style),
+                Span::raw(format!(" {value}")),
                 Span::styled(if is_focused { "▌" } else { "" }, Style::default().fg(Color::Magenta)),
             ])
         };
@@ -499,10 +520,7 @@ fn render_sprint_form(f: &mut Frame, form: &SprintForm, app: &App) {
     };
     match (&app.active_sprint, form.is_active) {
         (Some(old), true) => {
-            lines.push(Line::from(Span::styled(
-                format!("  Saving ends {} and starts this sprint.", old.name),
-                Style::default().fg(Color::Gray),
-            )));
+            lines.push(Line::from(format!("  Saving ends {} and starts this sprint.", old.name)));
             if carried.is_empty() {
                 lines.push(Line::from(Span::styled("  Nothing unfinished to carry over.", dim)));
             } else {
@@ -524,10 +542,9 @@ fn render_sprint_form(f: &mut Frame, form: &SprintForm, app: &App) {
                 }
             }
         }
-        (None, true) => lines.push(Line::from(Span::styled(
+        (None, true) => lines.push(Line::from(
             "  Saving starts this sprint. Then press s on backlog issues to pull them in.",
-            Style::default().fg(Color::Gray),
-        ))),
+        )),
         (_, false) => lines.push(Line::from(Span::styled(
             "  Saved as an inactive sprint (for planning or record keeping).",
             dim,
@@ -769,7 +786,9 @@ fn help_lines(rows: &[(&str, &str)]) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn render_help(f: &mut Frame) {
+/// The key reference. On a screen too short for it, it scrolls by `scroll` rows
+/// (capped here at what the screen needs).
+pub fn render_help(f: &mut Frame, scroll: &mut u16) {
     let two_columns = f.area().width >= 96;
     let rows = HELP_LEFT.len().max(HELP_RIGHT.len());
     let (width, height) = if two_columns {
@@ -779,9 +798,14 @@ fn render_help(f: &mut Frame) {
     };
     let area = centered_rect(width, height, f.area());
     f.render_widget(Clear, area);
+    *scroll = (*scroll).min(height.saturating_sub(area.height));
 
     let block = popup_block("Keys", Color::Cyan)
-        .title_bottom(hint("[Esc / q / ?] close"))
+        .title_bottom(hint(if height > area.height {
+            "[j/k] scroll  [Esc / q / ?] close"
+        } else {
+            "[Esc / q / ?] close"
+        }))
         .border_style(Style::default().fg(Color::Rgb(80, 80, 120)));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -795,10 +819,10 @@ fn render_help(f: &mut Frame) {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
             .split(inner);
-        f.render_widget(Paragraph::new(left), cols[0]);
-        f.render_widget(Paragraph::new(right), cols[1]);
+        f.render_widget(Paragraph::new(left).scroll((*scroll, 0)), cols[0]);
+        f.render_widget(Paragraph::new(right).scroll((*scroll, 0)), cols[1]);
     } else {
         left.extend(right.into_iter().skip(1));
-        f.render_widget(Paragraph::new(left), inner);
+        f.render_widget(Paragraph::new(left).scroll((*scroll, 0)), inner);
     }
 }

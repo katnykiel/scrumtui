@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.4.2] - 2026-10-27
+
+### Fixed
+- **Readable on light terminals.** The issue and sprint forms use the terminal's own text color instead of hardcoded white and light gray, which were invisible on a white background. Done issues are dark gray instead of light gray in every view.
+- **Issue form on short screens.** Field values (title, epic, status, due date) no longer disappear when the form doesn't fit; the subtask list scrolls instead, and below ~27 rows the fields drop their underlines. The epic and due-date dropdowns open upward when there is no room below.
+- **Help scrolls** (`j`/`k`) when the screen is too short to show it whole; before, the last sections were cut off at 80×24.
+- **No crash on small screens** when opening the trash, the epic detail or a form dropdown.
+- Form key hints no longer cut off; kanban cards shorten the epic name instead of cutting it mid-word.
+
+---
+
 ## [2.4.1] - 2026-10-27
 
 ### Fixed

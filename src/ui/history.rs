@@ -210,7 +210,7 @@ fn render_header(f: &mut Frame, sprint: &Sprint, stats: &SprintStats, area: Rect
 
     let mut scope = vec![
         Span::styled("  planned ", dim),
-        Span::styled(format!("{}sp", format_sp(stats.planned)), Style::default().fg(Color::Gray)),
+        Span::raw(format!("{}sp", format_sp(stats.planned))),
     ];
     if stats.added > 0.0 {
         scope.push(Span::styled(format!("  +{}sp added", format_sp(stats.added)), Style::default().fg(Color::Yellow)));
@@ -299,7 +299,7 @@ fn render_issue_list(f: &mut Frame, app: &mut App, sprint: &Sprint, area: Rect) 
             };
             let title_style = match (is_sel, e.outcome) {
                 (true, _) => Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
-                (false, Outcome::Done) => Style::default().fg(Color::Gray),
+                (false, Outcome::Done) => Style::default().fg(Color::DarkGray),
                 (false, Outcome::Removed) => Style::default().fg(Color::DarkGray),
                 _ => Style::default(),
             };

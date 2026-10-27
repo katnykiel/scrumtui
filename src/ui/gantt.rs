@@ -197,11 +197,12 @@ pub fn render_epic_detail_popup(f: &mut Frame, popup: &Popup) {
     };
 
     let area = f.area();
-    let width = area.width.min(96).max(40);
-    let height = area.height.min(40).max(10);
+    // Never larger than the screen: drawing outside the buffer panics.
+    let width = area.width.min(96);
+    let height = area.height.min(40);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
-    let popup_area = Rect { x, y, width, height: height.min(area.height) };
+    let popup_area = Rect { x, y, width, height };
 
     f.render_widget(Clear, popup_area);
 
@@ -220,7 +221,7 @@ pub fn render_epic_detail_popup(f: &mut Frame, popup: &Popup) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .title(Line::from(vec![
-            Span::raw(" ◆ "),
+            Span::styled(" ◆ ", Style::default().fg(Color::Magenta)),
             Span::styled(epic.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw(" "),
         ]))
@@ -295,7 +296,7 @@ pub fn render_epic_detail_popup(f: &mut Frame, popup: &Popup) {
             let is_done = issue.status == Status::Done;
             let title_style = match (is_sel, is_done) {
                 (true, _) => Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
-                (false, true) => Style::default().fg(Color::Gray),
+                (false, true) => Style::default().fg(Color::DarkGray),
                 (false, false) => Style::default(),
             };
             let due = issue.due_date.map(|d| format!("  {}", d.format("%b %d"))).unwrap_or_default();

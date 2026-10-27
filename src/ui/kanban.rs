@@ -121,7 +121,7 @@ fn render_subtask_panel(f: &mut Frame, app: &mut App, area: Rect) {
         let status_badge = format!("[{}]", issue.status.short().trim());
         let title_style = match (is_sel, is_done) {
             (true, _) => Style::default().add_modifier(Modifier::REVERSED),
-            (false, true) => Style::default().fg(Color::Gray),
+            (false, true) => Style::default().fg(Color::DarkGray),
             (false, false) => Style::default(),
         };
         let title_max = col_w.saturating_sub(5 + status_badge.len());
@@ -190,7 +190,7 @@ fn render_column(
             // Cards are bold; done cards are faded. The selected card's title is reversed.
             let title_style = match (is_sel, is_done) {
                 (true, _) => Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
-                (false, true) => Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+                (false, true) => Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
                 (false, false) => Style::default().add_modifier(Modifier::BOLD),
             };
             let mut lines: Vec<Line> = word_wrap(&issue.title, title_w)
@@ -227,7 +227,12 @@ fn render_column(
             if total_subs > 0 {
                 meta.push(Span::styled(format!(" · {done_subs}/{total_subs}"), dim));
             }
-            meta.push(Span::styled(format!(" · {}", trunc(&issue.epic, 14)), dim));
+            // The epic is shortened to the room left (inside the borders), or left out.
+            let used: usize = meta.iter().map(|s| s.width()).sum();
+            let room = (area.width as usize).saturating_sub(2 + used + 3).min(14);
+            if room >= 4 {
+                meta.push(Span::styled(format!(" · {}", trunc(&issue.epic, room)), dim));
+            }
             lines.push(Line::from(meta));
             ListItem::new(lines)
         })

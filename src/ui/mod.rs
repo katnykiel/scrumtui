@@ -67,6 +67,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             crate::app::Popup::GanttEpicDetail { .. } => {
                 gantt::render_epic_detail_popup(f, &p);
             }
+            crate::app::Popup::Help => popup::render_help(f, &mut app.help_scroll),
             _ => popup::render(f, &p, app),
         }
         app.popup = Some(p);

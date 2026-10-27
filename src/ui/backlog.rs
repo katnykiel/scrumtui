@@ -127,10 +127,10 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
                         issue.due_date.map(|d| due_color(d, is_done)).unwrap_or(Color::DarkGray),
                     );
                     // Active: terminal default fg (readable on light and dark themes).
-                    // Done: Gray, visibly faded on both.
+                    // Done: DarkGray, faded on both. (Gray is near-white on light themes.)
                     let title_style = match (is_sel, is_done) {
                         (true, _) => Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
-                        (false, true) => Style::default().fg(Color::Gray),
+                        (false, true) => Style::default().fg(Color::DarkGray),
                         (false, false) => Style::default(),
                     };
                     let bold = if is_sel { Modifier::BOLD } else { Modifier::empty() };
@@ -169,7 +169,7 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
                     // Subtasks: never bold, so they read as subordinate to their parent.
                     let title_style = match (is_sel, sub.status == Status::Done) {
                         (true, _) => Style::default().add_modifier(Modifier::REVERSED),
-                        (false, true) => Style::default().fg(Color::Gray),
+                        (false, true) => Style::default().fg(Color::DarkGray),
                         (false, false) => Style::default(),
                     };
                     // The indent is 5 wider than a parent's, so the title is 5 narrower

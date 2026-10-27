@@ -117,6 +117,38 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+/// Popups and dropdowns stay inside small screens (drawing outside the buffer panics).
+#[test]
+fn popups_fit_small_screens() {
+    let n_tab = |tabs: usize| {
+        let mut keys = vec![KeyCode::Char('n'), KeyCode::Char('x')];
+        keys.extend(std::iter::repeat(KeyCode::Tab).take(tabs));
+        keys
+    };
+    let mut epic_dropdown = n_tab(1);
+    epic_dropdown.push(KeyCode::Char('a'));
+    let cases = [
+        vec![KeyCode::Char('?')],
+        vec![KeyCode::Char('T')],
+        vec![KeyCode::Char('S')],
+        vec![KeyCode::Char('3'), KeyCode::Char('e')],
+        n_tab(4), // due date dropdown
+        epic_dropdown,
+    ];
+    for (w, h) in [(80, 24), (60, 16), (40, 12), (20, 5)] {
+        for keys in &cases {
+            let db = Db::open(":memory:").unwrap();
+            seed::seed(&db).unwrap();
+            let mut app = App::new(db).unwrap();
+            for k in keys {
+                app.handle_key(key(*k));
+            }
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        }
+    }
+}
+
 #[test]
 #[ignore = "writes README screenshots; run with SCRUMTUI_SNAPSHOT_DIR set"]
 fn render_readme_snapshots() {

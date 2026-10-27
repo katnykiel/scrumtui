@@ -496,6 +496,8 @@ pub struct App {
     pub kanban_sub_parent_idx: usize,
     /// Gantt scroll offset (epic rows)
     pub gantt_scroll: usize,
+    /// Help popup scroll offset (rows), for screens too short to show it whole
+    pub help_scroll: u16,
     /// Gantt selected epic index (for Enter to open detail popup)
     pub gantt_sel: usize,
     pub popup: Option<Popup>,
@@ -571,6 +573,7 @@ impl App {
             kanban_sub_row: 0,
             kanban_sub_parent_idx: 0,
             gantt_scroll: 0,
+            help_scroll: 0,
             gantt_sel: 0,
             popup: None,
             return_popup: None,
@@ -1443,6 +1446,7 @@ impl App {
             KeyCode::Char('q') if !ctrl => return true,
             KeyCode::Char('?') => {
                 self.popup = Some(Popup::Help);
+                self.help_scroll = 0;
                 return false;
             }
             KeyCode::Char('1') => { self.switch_view(View::Backlog); return false; }
@@ -1935,11 +1939,13 @@ impl App {
         match &mut self.popup {
             None => {}
 
-            Some(Popup::Help) => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')) {
-                    self.popup = None;
-                }
-            }
+            Some(Popup::Help) => match arrows_to_vim(key).code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => self.popup = None,
+                // The renderer caps the offset at what the screen needs.
+                KeyCode::Char('j') => self.help_scroll += 1,
+                KeyCode::Char('k') => self.help_scroll = self.help_scroll.saturating_sub(1),
+                _ => {}
+            },
 
             Some(Popup::ConfirmDelete(id, _)) => {
                 let id = *id;
